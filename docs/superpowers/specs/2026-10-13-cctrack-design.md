@@ -51,7 +51,7 @@ claude-tracker/
 ├── api/openapi.yaml                 # OpenAPI 3.0.x contract (source of truth)
 ├── apps/
 │   ├── cli/                         # Rust: clap, reqwest(rustls), tokio, serde, directories, open
-│   ├── server/                      # Go 1.25: net/http ServeMux, pgx/v5, goose, idtoken, oauth2
+│   ├── server/                      # Go 1.25: net/http ServeMux, pgx/v5, goose, oauth2, go-oidc
 │   │   ├── cmd/server/main.go
 │   │   ├── cmd/migrate/main.go
 │   │   ├── internal/...             # api (oapi-codegen), auth, db, ingest, pricing, query
@@ -65,7 +65,7 @@ claude-tracker/
 ├── .claude-plugin/marketplace.json  # makes the repo a plugin marketplace
 ├── docs/                            # setup guide, specs, plans
 ├── .github/workflows/ci.yml
-├── justfile
+├── Makefile                         # `just` is not installed; make is
 └── vercel.json
 ```
 
@@ -82,8 +82,8 @@ Code generation: Go server interfaces/types via **oapi-codegen v2** (std `net/ht
 | `claude_accounts` | id, account_uuid (unique), org_uuid, email, org_type, rate_limit_tier, label, plan, created_at | `plan` ∈ Pro / Max 5x / Max 20x / Team / Enterprise / API key / Unknown; label+plan admin-editable |
 | `devices` | id, user_id, hostname, os, first_seen, last_seen | unique (user_id, hostname) |
 | `sessions` | session_id (PK, Claude's UUID), user_id, device_id, account_id, cwd, project, git_branch, started_at, ended_at, summary, summary_at | |
-| `usage_entries` | id, session_id, user_id, account_id, message_id, request_id (`''` if absent), model, ts, input, output, cache_write_5m, cache_write_1h, cache_read, speed, is_subagent | **unique (session_id, message_id, request_id)**; indexes on (user_id, ts), (account_id, ts) |
-| `model_prices` | model (normalised id), input, cache_write_5m, cache_write_1h, cache_read, output, fast_input, fast_output, tier_threshold, tier_* columns, updated_at | seeded by migration, admin-editable |
+| `usage_entries` | id, session_id, user_id, account_id, message_id, request_id (`''` if absent), model, ts, input, output, cache_write_5m, cache_write_1h, cache_read, speed, is_subagent | **unique (message_id)** — API message ids are globally unique, `requestId` is missing on most lines, and resumed sessions re-copy earlier lines into a new session file; indexes on (user_id, ts), (account_id, ts) |
+| `model_prices` | model (normalised id), input, cache_write_5m, cache_write_1h, cache_read, output, fast_input, fast_output, long_input, long_cache_write_5m, long_cache_write_1h, long_cache_read, long_output, updated_at | seeded by migration, admin-editable; `long_*` apply when the prompt exceeds 100k tokens |
 | `limit_snapshots` | id, account_id, user_id, captured_at, five_hour_pct, five_hour_resets_at, seven_day_pct, seven_day_resets_at, source | unique (account_id, captured_at) |
 
 `user_id` and `account_id` are denormalised onto `usage_entries` so the two admin views are single-table aggregates.
@@ -98,20 +98,20 @@ Code generation: Go server interfaces/types via **oapi-codegen v2** (std `net/ht
 | `cctrack logout` | Calls `DELETE /api/auth/token`, deletes credentials. |
 | `cctrack whoami` | Calls `GET /api/me`; prints user, server, admin flag. |
 | `cctrack status [--json]` | **Local only, fast** (no network): logged in?, user, server, credentials valid flag, current Claude account from `~/.claude.json`, pending unsynced bytes. Exit 0 if logged in, 1 if not. |
-| `cctrack sync [--session ID] [--transcript PATH] [--detach]` | Parse new transcript bytes and upload (§5.4). `--detach` re-spawns itself detached and returns immediately. |
+| `cctrack sync [--transcript PATH] [--quiet]` | Parse new transcript bytes and upload (§5.4). Without `--transcript` it sweeps all transcripts modified since login. `--quiet` logs errors to `sync.log` (used by hooks, which spawn it detached). |
 | `cctrack upload --summary "…" [--session ID]` | Run a sync for the session, then `POST /api/sessions/{id}/summary`. Session defaults to the last session recorded by the SessionStart hook (`last_session`). |
 | `cctrack hook <event>` | Reads hook JSON on stdin, implements the gate/sync logic (§5.3). |
 
 Files:
 - `~/.config/cctrack/credentials.json` (mode 0600): `{server, token, user:{id,email,name}, logged_in_at, invalid:false}`. Plain file, not the OS keychain — the gate runs on every prompt/tool call and must be fast and never trigger a keychain prompt.
-- `~/.local/state/cctrack/` (via `directories`): `offsets.json` (per-transcript byte offset), `sync.lock`, `last_snapshot.json`, `last_session`, `sync.log`.
+- `~/.local/state/cctrack/`: `offsets.json` (per-transcript byte offset), `sync.lock`, `accounts.json` (account timeline, §5.4), `last_snapshot.json`, `last_session.json`, `sync.log`.
 - Respects `CLAUDE_CONFIG_DIR` (default `~/.claude`) for transcripts and `~/.claude.json`.
 
 ### 5.2 Login flow (server-brokered OAuth + PKCE)
 
 1. CLI binds `127.0.0.1:0` (random port), generates `state` and a PKCE `code_verifier`, opens the browser at `SERVER/api/auth/cli/start?port=P&state=S&code_challenge=C`.
 2. Server records an `auth_requests` row and redirects to Google (its own OAuth client, web flow, `openid email profile`).
-3. Google → `GET /api/auth/google/callback`. Server exchanges the code, verifies the ID token (`idtoken.Validate`), checks the allowlist (`hd` ∈ `ALLOWED_DOMAINS` or email ∈ `ALLOWED_EMAILS`), upserts the user, mints a one-time code (60 s) bound to the code_challenge, and redirects to `http://127.0.0.1:P/callback?code=X&state=S`.
+3. Google → `GET /api/auth/google/callback`. Server exchanges the code, verifies the ID token (go-oidc against Google's JWKS), checks the allowlist (`hd` ∈ `ALLOWED_DOMAINS` or email ∈ `ALLOWED_EMAILS`), upserts the user, mints a one-time code (60 s) bound to the code_challenge, and redirects to `http://127.0.0.1:P/callback?code=X&state=S`.
 4. CLI checks `state`, calls `POST /api/auth/cli/exchange {code, code_verifier, device_name}` → `{token, user}`. Server verifies `sha256(verifier)` matches the challenge, marks the code used, stores only `sha256(token)`.
 5. `--paste` mode (headless/SSH): no loopback; the server shows the one-time code on a page and the CLI prompts for it.
 
@@ -126,9 +126,9 @@ Hooks call `${CLAUDE_PLUGIN_ROOT}/scripts/run hook <event>`. The wrapper exits 2
 | `SessionStart` | Cannot block. Injects `additionalContext`: whether the user is logged in, the `session_id`, and (if not logged in) the instruction that no work may begin until `cctrack login` succeeds. Records `last_session`. Spawns `cctrack sync --detach` (sweep of all new transcript bytes). |
 | `UserPromptSubmit` | If not logged in or credentials marked invalid → `{"decision":"block","reason":"cctrack: not logged in. Run `cctrack login` in a terminal, then retry."}`. Otherwise allow silently. |
 | `PreToolUse` (matcher `*`) | If not logged in → `permissionDecision:"deny"` for every tool except `Bash` whose command is exactly `cctrack login…`, `cctrack status…`, or `cctrack whoami…`. |
-| `Stop`, `SessionEnd` | Spawn `cctrack sync --session <id> --transcript <path> --detach` and exit immediately (plugin SessionEnd hooks get ~1.5 s; Stop does not fire on user interrupt, the next SessionStart sweep catches it). |
+| `Stop`, `SessionEnd` | Spawn a detached `cctrack sync --quiet --transcript <path>` and exit immediately (plugin SessionEnd hooks get ~1.5 s; Stop does not fire on user interrupt, the next SessionStart sweep catches it). |
 
-Hook settings: short timeouts (gate hooks 5 s), fail-closed behaviour for gate hooks. The gate only checks local state (credentials file + `invalid` flag), so it never depends on the network. When a sync receives `401`, the CLI sets `invalid:true`, so a server-side revocation blocks the next prompt.
+Hook settings: short timeouts (10 s; SessionEnd 5 s). Gate hooks fail closed: the wrapper exits 2 (blocking) if the binary is missing, crashes, or exits non-zero. The PreToolUse allowlist rejects any command containing shell chaining or redirection (`; & | \` $( > <` or newlines). The gate only checks local state (credentials file + `invalid` flag), so it never depends on the network. When a sync receives `401`, the CLI sets `invalid:true`, so a server-side revocation blocks the next prompt.
 
 Enforcement hardening (documented, admin-applied): managed settings that force-enable the plugin via `enabledPlugins` and set `allowManagedHooksOnly`, so users cannot disable the hooks.
 
@@ -141,11 +141,11 @@ For each file, read from the stored byte offset to the last complete line:
 - Skip `message.model == "<synthetic>"` and `isApiErrorMessage == true`.
 - Skip entries with `timestamp < logged_in_at` (no backfill).
 - Extract: `message.id`, `requestId` (optional), `sessionId`, `timestamp`, `message.model`, `cwd`, `gitBranch`, `isSidechain`; usage `input_tokens`, `output_tokens`, `cache_read_input_tokens`, `cache_creation.ephemeral_5m_input_tokens`, `cache_creation.ephemeral_1h_input_tokens` (fallback: all `cache_creation_input_tokens` → 5m), `speed` (default `standard`).
-- Dedupe locally on `(message.id, requestId)` falling back to `(message.id, sessionId)` — one API response is written as several lines with identical usage. The server's unique key is the backstop.
+- Dedupe on `message.id` — one API response is written as several lines with identical usage (verified on real transcripts). The server's unique key is the backstop.
 
 Batching: entries grouped into requests < 1 MB (Vercel body cap is 4.5 MB). Offsets for a file advance **only after** the server accepts the batch containing its last entry. A lock file prevents concurrent syncs (a second sync exits quietly). Sync failures are logged to `sync.log`, never surfaced as hook errors.
 
-Account attribution: read `oauthAccount` from `~/.claude.json` at sync time (`accountUuid`, `organizationUuid`, `emailAddress`, `organizationType`, `organizationRateLimitTier`). If absent (API-key auth), send a synthetic "API key" account keyed per user+device.
+Account attribution: every SessionStart/UserPromptSubmit/Stop hook (and every sync) records the current `oauthAccount` from `~/.claude.json` (`accountUuid`, `organizationUuid`, `emailAddress`, `organizationType`, `organizationRateLimitTier`) into an account timeline whenever it changes. Each entry is attributed to the account active at its timestamp, so switching accounts before a sync does not misattribute earlier usage. If no `oauthAccount` is present (API-key auth), entries use `account_uuid: "api_key"`, which the server maps to a synthetic "API key" account per user+device.
 
 Limit snapshot: if `~/.claude.json` `cachedUsageUtilization` (undocumented) has `accountUuid` matching the current account and `fetchedAtMs` newer than `last_snapshot.json`, attach `{five_hour:{pct,resets_at}, seven_day:{pct,resets_at}, captured_at}`. Parsed defensively — any shape mismatch means "no snapshot", never an error.
 
@@ -186,13 +186,14 @@ Limit snapshot: if `~/.claude.json` `cachedUsageUtilization` (undocumented) has 
   - `GET /admin/accounts`, `PATCH /admin/accounts/{id}` (`label`, `plan`).
   - `GET /admin/users`, `GET /admin/users/{id}/sessions`.
   - `GET /admin/tokens`, `DELETE /admin/tokens/{id}`.
-  - `GET /admin/prices`, `PUT /admin/prices/{model}`.
+  - `GET /admin/prices`, `PUT /admin/prices/{model}` (body: rates; `model` is normalised).
 
 ### 7.4 Cost computation
-SQL aggregates token sums grouped by requested dimensions plus `model`, `speed`, and a Haiku-5.5 tier flag (`input + cache_write_5m + cache_write_1h + cache_read > 100000`). Go normalises model ids and multiplies by the cached price table:
+SQL aggregates token sums grouped by requested dimensions plus `model`, `speed`, and a long-context flag (`input + cache_write_5m + cache_write_1h + cache_read > 100000`). Go normalises model ids and multiplies by the price table (loaded per request):
 
 - Normalisation: strip date suffixes (`-20251001`), `[1m]`, Bedrock `us.`/`eu.`/`anthropic.` prefixes and `-v1:0`, Vertex `@date`.
-- Fast mode uses `fast_input`/`fast_output` where set (Opus 5.5 $8/$40; Opus 5 and 4.8 $10/$50).
+- Fast mode uses `fast_output` for output and scales input and cache rates by `fast_input / input`, where set (Opus 5.5 $8/$40; Opus 5 and 4.8 $10/$50).
+- Long-context rates (`long_*`) apply per request when the long-context flag is set (Haiku 5.5).
 - Models with no price contribute to `unpriced_tokens`, never $0.
 
 Seed prices (USD per MTok — input / 5m write / 1h write / cache read / output):
@@ -215,15 +216,15 @@ Seed prices (USD per MTok — input / 5m write / 1h write / cache read / output)
 
 ### 7.5 Security
 - Web session: stateless HMAC-signed cookie (`SESSION_SECRET`), HttpOnly, Secure, SameSite=Lax, 30-day expiry.
-- Mutating endpoints require `Content-Type: application/json` (blocks cross-site form CSRF given SameSite=Lax).
-- Bearer tokens looked up by sha256; `last_used_at` updated at most once per minute.
+- Cookie-authenticated non-GET requests require the header `X-CCTrack: 1`; browsers cannot send a custom header cross-site without a CORS preflight, which the server never grants. Bearer-authenticated requests are exempt.
+- Bearer tokens looked up by sha256; `last_used_at` updated on each use.
 - Request body limit 1 MB; OAuth `state` and one-time codes single-use with TTLs.
 - No transcript content is ever accepted by the API.
 
 ## 8. Web app (`apps/web`)
 
 - `/login` — Sign in with Google.
-- `/` **My usage** — KPI cards (tokens and est. API cost: today / 7 d / 30 d), stacked area chart of daily cost by model, by-account table, current 5h/7d limit gauges for accounts used, sessions list (project, branch, tokens, cost, summary).
+- `/` **My usage** — KPI cards (est. API cost with unpriced tokens, total tokens, output tokens, session count) for the selected range (presets: today / 7 d / 30 d / 90 d), stacked area chart of daily cost by model, by-account table, current 5h/7d limit gauges for accounts used, sessions list (project, branch, tokens, cost, summary).
 - `/admin/logins` — **By login**: table users × accounts grouped by plan (tokens, cost, sessions); stacked bar per user split by account; drill-down to a user's sessions and summaries.
 - `/admin/accounts` — **By account**: card per account with label/plan, limit gauges, donut of per-user share, daily stacked bar per user, line chart of 5h/7d limit % over time with reset markers.
 - `/admin/settings` — edit account label/plan, list users, revoke tokens, edit prices.
@@ -236,11 +237,12 @@ Seed prices (USD per MTok — input / 5m write / 1h write / cache read / output)
 - Env vars: `DATABASE_URL`, `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `SESSION_SECRET`, `PUBLIC_URL`, `ALLOWED_DOMAINS`, `ALLOWED_EMAILS`, `ADMIN_EMAILS`, optional `AUTO_MIGRATE`.
 - Migrations: goose, embedded. `cmd/migrate` run explicitly; `AUTO_MIGRATE=true` runs them at startup under a Postgres advisory lock.
 - The Go server is plain `net/http` + env config, so it can also run as a container elsewhere.
-- Local dev: `just dev` (Go server + Vite dev server proxying `/api`), requires `DATABASE_URL` (a Neon dev branch works — no local Postgres install required). `just gen` regenerates OpenAPI code. `just test`, `just build`.
+- Local dev: `make dev-server` + `make dev-web` (Vite proxies `/api`), requires `DATABASE_URL` (a Neon dev branch works — no local Postgres install required). `make gen` regenerates OpenAPI code. `make test` runs every suite.
 - `docs/setup.md`: Google OAuth client setup (authorised redirect `PUBLIC_URL/api/auth/google/callback`), Vercel + Neon steps, plugin install, managed-settings snippet.
 
 ## 10. Testing
 
+- **Plugin**: `scripts/test-run.sh` checks the wrapper fails closed for gate events.
 - **Rust**: parser unit tests with fixture JSONL (dedupe across multi-line responses, missing requestId, `<synthetic>`/error skip, subagent files, partial trailing line, offset resume, login-time cutoff); `~/.claude.json` parsing including malformed/missing fields; hook gate tests (stdin JSON → exit code/stdout JSON); sync test against a local mock HTTP server (offsets advance only on success, 401 marks credentials invalid).
 - **Go**: unit tests for pricing/normalisation, allowlist, cookie signing, PKCE; `httptest` handler tests; DB integration tests against `TEST_DATABASE_URL` (skipped when unset) for ingest idempotency and aggregate queries.
 - **Web**: `tsc --noEmit` and `vite build`.
