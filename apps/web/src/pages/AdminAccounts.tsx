@@ -27,28 +27,30 @@ function AccountCard({ d, range }: { d: AccountDetail; range: Range }) {
           <h2>Share of this account</h2>
           <ShareDonut data={d.by_user.map((u) => ({ name: u.user.email, value: u.share }))} format={formatPct} />
           <UnpricedNote tokens={d.totals.unpriced_tokens} />
-          <table>
-            <thead>
-              <tr>
-                <th>User</th>
-                <th className="num">Share</th>
-                <th className="num">Tokens</th>
-                <th className="num">Est. cost</th>
-              </tr>
-            </thead>
-            <tbody>
-              {d.by_user.map((u) => (
-                <tr key={u.user.id}>
-                  <td>{u.user.email}</td>
-                  <td className="num">{formatPct(u.share)}</td>
-                  <td className="num">{formatTokens(u.totals.total_tokens)}</td>
-                  <td className="num">
-                    <Cost totals={u.totals} />
-                  </td>
+          <div className="table-scroll">
+            <table>
+              <thead>
+                <tr>
+                  <th>User</th>
+                  <th className="num">Share</th>
+                  <th className="num">Tokens</th>
+                  <th className="num">Est. cost</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {d.by_user.map((u) => (
+                  <tr key={u.user.id}>
+                    <td>{u.user.email}</td>
+                    <td className="num">{formatPct(u.share)}</td>
+                    <td className="num">{formatTokens(u.totals.total_tokens)}</td>
+                    <td className="num">
+                      <Cost totals={u.totals} />
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         </div>
         <div>
           <h2>Daily cost per user</h2>

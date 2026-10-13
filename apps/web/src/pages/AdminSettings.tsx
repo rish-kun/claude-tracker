@@ -58,12 +58,14 @@ function Accounts() {
       <h2>Claude accounts</h2>
       <p className="muted">Accounts appear automatically when a user's Claude Code reports usage. Set a recognisable label and the plan.</p>
       {q.error && <div className="error">{q.error.message}</div>}
-      <table>
-        <thead>
-          <tr><th>Label</th><th>Plan</th><th /></tr>
-        </thead>
-        <tbody>{q.data?.map((a) => <AccountRow key={a.id} a={a} />)}</tbody>
-      </table>
+      <div className="table-scroll">
+        <table>
+          <thead>
+            <tr><th>Label</th><th>Plan</th><th /></tr>
+          </thead>
+          <tbody>{q.data?.map((a) => <AccountRow key={a.id} a={a} />)}</tbody>
+        </table>
+      </div>
     </section>
   )
 }
@@ -74,23 +76,25 @@ function Users() {
     <section className="card">
       <h2>Users</h2>
       {q.error && <div className="error">{q.error.message}</div>}
-      <table>
-        <thead>
-          <tr><th>User</th><th>Joined</th><th>Last seen</th></tr>
-        </thead>
-        <tbody>
-          {q.data?.map((u) => (
-            <tr key={u.id}>
-              <td>
-                {u.name || u.email} {u.is_admin && <span className="badge">admin</span>}
-                <div className="muted">{u.email}</div>
-              </td>
-              <td>{formatDateTime(u.created_at)}</td>
-              <td>{u.last_seen_at ? formatDateTime(u.last_seen_at) : '—'}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
+      <div className="table-scroll">
+        <table>
+          <thead>
+            <tr><th>User</th><th>Joined</th><th>Last seen</th></tr>
+          </thead>
+          <tbody>
+            {q.data?.map((u) => (
+              <tr key={u.id}>
+                <td>
+                  {u.name || u.email} {u.is_admin && <span className="badge">admin</span>}
+                  <div className="muted">{u.email}</div>
+                </td>
+                <td>{formatDateTime(u.created_at)}</td>
+                <td>{u.last_seen_at ? formatDateTime(u.last_seen_at) : '—'}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
     </section>
   )
 }
@@ -103,35 +107,37 @@ function Tokens() {
       <h2>CLI tokens</h2>
       {q.error && <div className="error">{q.error.message}</div>}
       {revoke.error && <div className="error">Revoke failed: {revoke.error.message}</div>}
-      <table>
-        <thead>
-          <tr><th>User</th><th>Device</th><th>Created</th><th>Last used</th><th /></tr>
-        </thead>
-        <tbody>
-          {q.data?.map((t) => (
-            <tr key={t.id}>
-              <td>{t.user.email}</td>
-              <td>{t.device_name}</td>
-              <td>{formatDateTime(t.created_at)}</td>
-              <td>{t.last_used_at ? formatDateTime(t.last_used_at) : '—'}</td>
-              <td>
-                {t.revoked_at ? (
-                  <span className="muted">Revoked {formatDateTime(t.revoked_at)}</span>
-                ) : (
-                  <button
-                    disabled={revoke.isPending}
-                    onClick={() => {
-                      if (confirm(`Revoke ${t.user.email}'s token on ${t.device_name}? Their Claude Code will stop working until they log in again.`)) revoke.mutate(t.id)
-                    }}
-                  >
-                    Revoke
-                  </button>
-                )}
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
+      <div className="table-scroll">
+        <table>
+          <thead>
+            <tr><th>User</th><th>Device</th><th>Created</th><th>Last used</th><th /></tr>
+          </thead>
+          <tbody>
+            {q.data?.map((t) => (
+              <tr key={t.id}>
+                <td>{t.user.email}</td>
+                <td>{t.device_name}</td>
+                <td>{formatDateTime(t.created_at)}</td>
+                <td>{t.last_used_at ? formatDateTime(t.last_used_at) : '—'}</td>
+                <td>
+                  {t.revoked_at ? (
+                    <span className="muted">Revoked {formatDateTime(t.revoked_at)}</span>
+                  ) : (
+                    <button
+                      disabled={revoke.isPending}
+                      onClick={() => {
+                        if (confirm(`Revoke ${t.user.email}'s token on ${t.device_name}? Their Claude Code will stop working until they log in again.`)) revoke.mutate(t.id)
+                      }}
+                    >
+                      Revoke
+                    </button>
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
     </section>
   )
 }
@@ -266,21 +272,23 @@ function Prices() {
         unpriced; the id is normalised (dates and provider prefixes removed), and an existing model's price is replaced.
       </p>
       {q.error && <div className="error">{q.error.message}</div>}
-      <table>
-        <thead>
-          <tr>
-            <th>Model</th>
-            {BASE_RATE_FIELDS.map((f) => (
-              <th key={f.key} className="num">{f.label}</th>
-            ))}
-            <th />
-          </tr>
-        </thead>
-        <tbody>{q.data?.map((p) => <PriceRow key={p.model} p={p} />)}</tbody>
-        <tfoot>
-          <AddPriceRow />
-        </tfoot>
-      </table>
+      <div className="table-scroll">
+        <table>
+          <thead>
+            <tr>
+              <th>Model</th>
+              {BASE_RATE_FIELDS.map((f) => (
+                <th key={f.key} className="num">{f.label}</th>
+              ))}
+              <th />
+            </tr>
+          </thead>
+          <tbody>{q.data?.map((p) => <PriceRow key={p.model} p={p} />)}</tbody>
+          <tfoot>
+            <AddPriceRow />
+          </tfoot>
+        </table>
+      </div>
     </section>
   )
 }
