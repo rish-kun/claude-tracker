@@ -1,3 +1,4 @@
+import { useQueryClient } from '@tanstack/react-query'
 import { Link, Outlet, useNavigate } from '@tanstack/react-router'
 import { useEffect, useMemo, useState } from 'react'
 import { ApiError } from '../api/client'
@@ -16,6 +17,7 @@ export function AppLayout() {
   const me = useMe()
   const logout = useLogout()
   const navigate = useNavigate()
+  const queryClient = useQueryClient()
   const [preset, setPreset] = useState<Preset>('30d')
   const range = useMemo(() => presetRange(preset), [preset])
   const unauthorized = me.error instanceof ApiError && me.error.status === 401
@@ -50,9 +52,18 @@ export function AppLayout() {
           ))}
         </div>
         <span className="muted">{me.data.email}</span>
+        {logout.error && <span className="error">Sign out failed: {logout.error.message}</span>}
         <button
           className="link"
-          onClick={() => logout.mutate(undefined, { onSuccess: () => void navigate({ to: '/login' }) })}
+          disabled={logout.isPending}
+          onClick={() =>
+            logout.mutate(undefined, {
+              onSuccess: async () => {
+                await navigate({ to: '/login' })
+                queryClient.clear()
+              },
+            })
+          }
         >
           Sign out
         </button>

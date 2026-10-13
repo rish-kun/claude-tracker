@@ -1,4 +1,4 @@
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useMutation, useQuery } from '@tanstack/react-query'
 import { api, unwrap } from './client'
 import { type Range, rangeKey, rangeQuery } from '../lib/range'
 
@@ -8,11 +8,10 @@ export function useMe() {
   return useQuery({ queryKey: ['me'], queryFn: () => unwrap(api.GET('/me')), retry: false })
 }
 
+/** Throws ApiError on a non-2xx response; the caller navigates away and then clears the cache. */
 export function useLogout() {
-  const qc = useQueryClient()
   return useMutation({
-    mutationFn: () => api.POST('/auth/logout'),
-    onSuccess: () => qc.clear(),
+    mutationFn: () => unwrap(api.POST('/auth/logout')),
   })
 }
 
