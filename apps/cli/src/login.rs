@@ -15,7 +15,7 @@ use sha2::{Digest, Sha256};
 use crate::client::{ApiClient, ApiError};
 use crate::credentials::{self, AuthState, Credentials};
 use crate::paths::Paths;
-use crate::sync::hostname;
+use crate::sync::{self, SyncOptions, hostname};
 use crate::timeline;
 
 pub struct Pkce {
@@ -154,6 +154,13 @@ pub fn login(paths: &Paths, server: &str, paste: bool, now: DateTime<Utc>) -> Re
     }
 
     let resp = ApiClient::new(server, None).exchange(&code, &pk.verifier, &hostname())?;
+    // Usage recorded so far belongs to the previous user: upload it with their
+    // token before their credentials are replaced.
+    if let AuthState::LoggedIn(old) = credentials::load(paths)
+        && (old.user.id != resp.user.id || old.server != server)
+    {
+        best_effort_sync(paths, &old, "for the previous login");
+    }
     // Keep the earlier start time when the same user logs in again, so usage
     // between the two logins that was never synced is not dropped.
     let logged_in_at = match credentials::load(paths) {
@@ -178,11 +185,29 @@ pub enum LogoutOutcome {
     RevokeFailed(ApiError),
 }
 
-/// Revokes this device's token on the server, then deletes local credentials
-/// regardless of whether the revoke succeeded.
+/// Uploads pending usage with `creds` before they stop being usable. Failures
+/// are reported on stderr and never block the caller.
+pub fn best_effort_sync(paths: &Paths, creds: &Credentials, context: &str) {
+    let client = ApiClient::new(&creds.server, Some(&creds.token));
+    let opts = SyncOptions { transcript: None, wait_for_lock: Duration::from_secs(10) };
+    match sync::run(paths, creds, &client, &opts, Utc::now()) {
+        Ok(r) if r.skipped_locked => {
+            eprintln!("cctrack: another sync is still running; some usage {context} may not be uploaded")
+        }
+        Ok(_) => {}
+        Err(e) => eprintln!("cctrack: could not upload pending usage {context}: {e:#}"),
+    }
+}
+
+/// Uploads pending usage (best effort), revokes this device's token on the
+/// server, then deletes local credentials regardless of whether the revoke
+/// succeeded.
 pub fn logout(paths: &Paths) -> Result<LogoutOutcome> {
     let outcome = match credentials::load(paths) {
         AuthState::LoggedIn(c) | AuthState::Invalid(c) => {
+            if !c.invalid {
+                best_effort_sync(paths, &c, "before logging out");
+            }
             match ApiClient::new(&c.server, Some(&c.token)).revoke_own_token() {
                 Ok(()) | Err(ApiError::Unauthorized(_)) => LogoutOutcome::Revoked,
                 Err(e) => LogoutOutcome::RevokeFailed(e),
@@ -334,6 +359,50 @@ mod tests {
         saved_creds(&paths, &format!("http://127.0.0.1:{port}"));
         assert!(matches!(logout(&paths).unwrap(), LogoutOutcome::RevokeFailed(ApiError::Network(_))));
         assert!(matches!(credentials::load(&paths), AuthState::LoggedOut));
+    }
+
+    #[test]
+    fn logout_syncs_pending_usage_before_revoking() {
+        use std::sync::{Arc, Mutex};
+        let mut server = mockito::Server::new();
+        let order: Arc<Mutex<Vec<&'static str>>> = Arc::default();
+        let (o1, o2) = (order.clone(), order.clone());
+        let ingest = server
+            .mock("POST", "/api/ingest")
+            .match_header("authorization", "Bearer cct_abc")
+            .with_body_from_request(move |_| {
+                o1.lock().unwrap().push("ingest");
+                br#"{"accepted":1,"duplicates":0}"#.to_vec()
+            })
+            .create();
+        let revoke = server
+            .mock("DELETE", "/api/auth/token")
+            .match_header("authorization", "Bearer cct_abc")
+            .with_body_from_request(move |_| {
+                o2.lock().unwrap().push("revoke");
+                b"{}".to_vec()
+            })
+            .create();
+
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::under(dir.path());
+        let creds = Credentials {
+            server: server.url(),
+            token: "cct_abc".into(),
+            user: crate::credentials::UserInfo { id: 1, email: "dev@example.com".into(), name: "Dev".into() },
+            logged_in_at: "2026-10-01T00:00:00Z".parse().unwrap(),
+            invalid: false,
+        };
+        credentials::save(&paths, &creds).unwrap();
+        let t = paths.projects_dir().join("-p/s1.jsonl");
+        std::fs::create_dir_all(t.parent().unwrap()).unwrap();
+        std::fs::write(&t, r#"{"type":"assistant","sessionId":"s1","timestamp":"2026-10-01T10:00:00Z","message":{"id":"m1","model":"claude-opus-5-5","usage":{"input_tokens":1,"output_tokens":1}}}"#.to_string() + "\n").unwrap();
+
+        assert!(matches!(logout(&paths).unwrap(), LogoutOutcome::Revoked));
+        assert_eq!(*order.lock().unwrap(), vec!["ingest", "revoke"]);
+        assert!(matches!(credentials::load(&paths), AuthState::LoggedOut));
+        ingest.assert();
+        revoke.assert();
     }
 
     #[test]
