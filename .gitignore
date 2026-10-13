@@ -11,3 +11,7 @@ apps/web/dist/
 .idea/
 .vscode/
 .vercel
+# Neon (local link + pulled secrets)
+.neon
+.env.local
+node_modules/
