@@ -70,26 +70,28 @@ export function BreakdownTable({ title, rows }: { title: string; rows: Breakdown
       {rows.length === 0 ? (
         <Empty />
       ) : (
-        <table>
-          <thead>
-            <tr>
-              <th>Name</th>
-              <th className="num">Tokens</th>
-              <th className="num">Est. cost</th>
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map((r) => (
-              <tr key={r.key}>
-                <td>{r.label}</td>
-                <td className="num">{formatTokens(r.totals.total_tokens)}</td>
-                <td className="num">
-                  <Cost totals={r.totals} />
-                </td>
+        <div className="table-scroll">
+          <table>
+            <thead>
+              <tr>
+                <th>Name</th>
+                <th className="num">Tokens</th>
+                <th className="num">Est. cost</th>
               </tr>
-            ))}
-          </tbody>
-        </table>
+            </thead>
+            <tbody>
+              {rows.map((r) => (
+                <tr key={r.key}>
+                  <td>{r.label}</td>
+                  <td className="num">{formatTokens(r.totals.total_tokens)}</td>
+                  <td className="num">
+                    <Cost totals={r.totals} />
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       )}
     </section>
   )
@@ -138,24 +140,26 @@ export function SessionsTable({
   return (
     <>
       {err}
-      <table>
-        <thead>
-          <tr>
-            <th>Started</th>
-            {showUser && <th>User</th>}
-            <th>Project</th>
-            <th>Account</th>
-            <th>Summary</th>
-            <th className="num">Tokens</th>
-            <th className="num">Est. cost</th>
-          </tr>
-        </thead>
-        <tbody>
-          {data.items.map((s) => (
-            <SessionRow key={s.session_id} s={s} showUser={showUser} />
-          ))}
-        </tbody>
-      </table>
+      <div className="table-scroll">
+        <table>
+          <thead>
+            <tr>
+              <th>Started</th>
+              {showUser && <th>User</th>}
+              <th>Project</th>
+              <th>Account</th>
+              <th>Summary</th>
+              <th className="num">Tokens</th>
+              <th className="num">Est. cost</th>
+            </tr>
+          </thead>
+          <tbody>
+            {data.items.map((s) => (
+              <SessionRow key={s.session_id} s={s} showUser={showUser} />
+            ))}
+          </tbody>
+        </table>
+      </div>
       <div className="pager">
         <button disabled={page === 0} onClick={() => onPage(page - 1)}>Previous</button>
         <span className="muted">Page {page + 1} of {pages}</span>

@@ -59,10 +59,31 @@ export function startOfDay(d: Date, tz: string): Date {
   return zonedMidnight(dayString(d, tz), tz)
 }
 
+const MINUTE_MS = 60_000
+
+/** The first whole minute strictly after instant `t` (ms since epoch). */
+export function nextMinute(t: number): number {
+  return Math.floor(t / MINUTE_MS) * MINUTE_MS + MINUTE_MS
+}
+
+/**
+ * Milliseconds from `t` until the preset range next changes. `to` advances on each whole
+ * minute and local midnight is always a whole minute, so ticking on minute boundaries
+ * advances the range every minute and starts a new day as soon as the date changes.
+ */
+export function msUntilRangeTick(t: number): number {
+  return nextMinute(t) - t
+}
+
+/**
+ * The range for preset `p` at `now`: local midnight `days - 1` days ago up to the next whole
+ * minute. Rounding `to` up keeps the range (and the query keys built from it) identical for
+ * every `now` within the same minute, so periodic recomputation doesn't thrash the cache.
+ */
 export function presetRange(p: Preset, now = new Date(), tz = browserTz()): Range {
   const days = PRESET_DAYS[p]
   const from = zonedMidnight(addDays(dayString(now, tz), -(days - 1)), tz)
-  return { from, to: new Date(now.getTime() + 60_000), tz }
+  return { from, to: new Date(nextMinute(now.getTime())), tz }
 }
 
 /** Every calendar day in `tz` touched by the range, in order. */
@@ -81,4 +102,14 @@ export function rangeQuery(r: Range) {
 
 export function rangeKey(r: Range): string {
   return `${r.from.toISOString()}|${r.to.toISOString()}|${r.tz}`
+}
+
+/**
+ * Whether range key `next` is `prev` with only its end advanced (same start and timezone).
+ * Data for `prev` is a fair placeholder while `next` loads; data for another preset or day is not.
+ */
+export function rangeAdvanced(prev: string, next: string): boolean {
+  const [pFrom, pTo, pTz] = prev.split('|')
+  const [nFrom, nTo, nTz] = next.split('|')
+  return pFrom === nFrom && pTz === nTz && pTo !== undefined && nTo !== undefined && pTo <= nTo
 }

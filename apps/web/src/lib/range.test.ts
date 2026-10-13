@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { datesBetween, dayString, presetRange, rangeQuery, startOfDay } from './range'
+import { datesBetween, dayString, msUntilRangeTick, nextMinute, presetRange, rangeAdvanced, rangeKey, rangeQuery, startOfDay } from './range'
 
 describe('range', () => {
   it('computes day strings in a timezone', () => {
@@ -68,5 +68,53 @@ describe('range', () => {
     expect(startOfDay(new Date('2026-09-06T15:00:00Z'), tz).toISOString()).toBe('2026-09-06T04:00:00.000Z')
     const r = presetRange('today', new Date('2026-09-06T15:00:00Z'), tz)
     expect(datesBetween(r)).toEqual(['2026-09-06'])
+  })
+
+  describe('advancing ranges', () => {
+    it('rounds `to` up to the next whole minute', () => {
+      expect(new Date(nextMinute(Date.parse('2026-10-13T10:00:00.000Z'))).toISOString()).toBe('2026-10-13T10:01:00.000Z')
+      expect(new Date(nextMinute(Date.parse('2026-10-13T10:00:59.999Z'))).toISOString()).toBe('2026-10-13T10:01:00.000Z')
+      const r = presetRange('30d', new Date('2026-10-13T10:00:12.345Z'), 'UTC')
+      expect(r.to.toISOString()).toBe('2026-10-13T10:01:00.000Z')
+    })
+
+    it('keeps the same key within a minute and advances it on the next one', () => {
+      const a = rangeKey(presetRange('7d', new Date('2026-10-13T10:00:01Z'), 'UTC'))
+      const b = rangeKey(presetRange('7d', new Date('2026-10-13T10:00:58Z'), 'UTC'))
+      const c = rangeKey(presetRange('7d', new Date('2026-10-13T10:01:00Z'), 'UTC'))
+      expect(a).toBe(b)
+      expect(c).not.toBe(b)
+      expect(rangeAdvanced(b, c)).toBe(true)
+    })
+
+    it("moves 'today' to the new day as soon as local midnight passes", () => {
+      const tz = 'Asia/Kolkata'
+      const before = presetRange('today', new Date('2026-10-13T18:29:30Z'), tz) // 23:59:30 IST
+      const after = presetRange('today', new Date('2026-10-13T18:30:00Z'), tz) // 00:00 IST
+      expect(datesBetween(before)).toEqual(['2026-10-13'])
+      expect(after.from.toISOString()).toBe('2026-10-13T18:30:00.000Z')
+      expect(datesBetween(after)).toEqual(['2026-10-14'])
+      expect(rangeAdvanced(rangeKey(before), rangeKey(after))).toBe(false)
+    })
+
+    it('gives the same range for any instant in the minute, including its last ms', () => {
+      const tz = 'Asia/Kolkata'
+      const t = Date.parse('2026-10-13T18:29:05Z') // 23:59:05 IST, last minute of the day
+      const last = new Date(nextMinute(t) - 1)
+      expect(rangeKey(presetRange('today', last, tz))).toBe(rangeKey(presetRange('today', new Date(t), tz)))
+    })
+
+    it('schedules the next tick on the minute boundary, which includes midnight', () => {
+      expect(msUntilRangeTick(Date.parse('2026-10-13T18:29:30Z'))).toBe(30_000)
+      expect(msUntilRangeTick(Date.parse('2026-10-13T18:30:00Z'))).toBe(60_000)
+    })
+
+    it('treats a different preset or timezone as a new range, not an advance', () => {
+      const now = new Date('2026-10-13T10:00:00Z')
+      const k7 = rangeKey(presetRange('7d', now, 'UTC'))
+      expect(rangeAdvanced(k7, rangeKey(presetRange('30d', now, 'UTC')))).toBe(false)
+      expect(rangeAdvanced(k7, rangeKey(presetRange('7d', now, 'Asia/Kolkata')))).toBe(false)
+      expect(rangeAdvanced(k7, k7)).toBe(true)
+    })
   })
 })

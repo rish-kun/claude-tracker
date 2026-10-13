@@ -60,3 +60,39 @@ export function modelError(model: string): string | undefined {
   if (/\s/.test(t)) return 'Model id must not contain spaces.'
   return undefined
 }
+
+/** Whether two rate sets agree on the five base rates (the ones a row edits). */
+export function baseRatesEqual(a: PriceRates, b: PriceRates): boolean {
+  return BASE_RATE_FIELDS.every((f) => a[f.key] === b[f.key])
+}
+
+/** An editable price row: the typed draft and the server rates it was started from. */
+export interface RowDraft {
+  draft: RateDraft
+  base: PriceRates
+}
+
+export function rowDraft(r: PriceRates): RowDraft {
+  return { draft: draftFromRates(r), base: r }
+}
+
+/** Whether the user has edited the draft away from the rates it was started from. */
+export function rowDirty(s: RowDraft): boolean {
+  return draftChanged(s.draft, s.base)
+}
+
+/**
+ * Reconciles a row with the latest server rates. A pristine draft (or one already typed to
+ * exactly the new values) follows the server; any other dirty draft is kept as typed
+ * (returned unchanged) so `rowConflict` can flag it instead of a save silently overwriting
+ * the newer value. Returns `s` itself when nothing changes.
+ */
+export function syncRowDraft(s: RowDraft, server: PriceRates): RowDraft {
+  if (baseRatesEqual(s.base, server)) return s
+  return rowDirty(s) && draftChanged(s.draft, server) ? s : rowDraft(server)
+}
+
+/** The server's base rates changed underneath an edited draft. */
+export function rowConflict(s: RowDraft, server: PriceRates): boolean {
+  return !baseRatesEqual(s.base, server)
+}

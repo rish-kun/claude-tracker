@@ -55,55 +55,74 @@ function Content() {
       </section>
       <section className="card">
         <h2>Usage per login, per plan and account</h2>
-        <table>
-          <thead>
-            <tr>
-              <th rowSpan={2}>Login</th>
-              <th rowSpan={2} className="num">Total</th>
-              {groups.map((g) => (
-                <th key={g.plan} colSpan={groupSpan(g)}>{PLAN_LABELS[g.plan]}</th>
-              ))}
-            </tr>
-            <tr>
-              {groups.map((g) => (
-                <Fragment key={g.plan}>
-                  {g.accounts.map((c) => (
-                    <th key={c.id} className="num">{c.label}</th>
-                  ))}
-                  {hasSubtotal(g) && <th className="num">All {PLAN_LABELS[g.plan]}</th>}
-                </Fragment>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {data.users.map((u) => (
-              <Fragment key={u.user.id}>
-                <tr className="clickable" onClick={() => setOpen(open === u.user.id ? null : u.user.id)}>
-                  <td>
-                    {u.user.name || u.user.email}
-                    <div className="muted">{u.user.email}</div>
-                  </td>
-                  <TotalsCell totals={u.totals} />
-                  {groups.map((g) => (
-                    <Fragment key={g.plan}>
-                      {g.accounts.map((c) => (
-                        <TotalsCell key={c.id} totals={u.by_account.find((a) => a.account.id === c.id)?.totals} />
+        <div className="table-scroll">
+          <table>
+            <thead>
+              <tr>
+                <th rowSpan={2}>Login</th>
+                <th rowSpan={2} className="num">Total</th>
+                {groups.map((g) => (
+                  <th key={g.plan} colSpan={groupSpan(g)}>{PLAN_LABELS[g.plan]}</th>
+                ))}
+              </tr>
+              <tr>
+                {groups.map((g) => (
+                  <Fragment key={g.plan}>
+                    {g.accounts.map((c) => (
+                      <th key={c.id} className="num">{c.label}</th>
+                    ))}
+                    {hasSubtotal(g) && <th className="num">All {PLAN_LABELS[g.plan]}</th>}
+                  </Fragment>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {data.users.map((u) => {
+                const expanded = open === u.user.id
+                const toggle = () => setOpen(expanded ? null : u.user.id)
+                const sessionsId = `login-sessions-${u.user.id}`
+                return (
+                  <Fragment key={u.user.id}>
+                    <tr className="clickable" onClick={toggle}>
+                      <td>
+                        <button
+                          type="button"
+                          className="disclosure"
+                          aria-expanded={expanded}
+                          aria-controls={expanded ? sessionsId : undefined}
+                          title={expanded ? 'Hide sessions' : 'Show sessions'}
+                          onClick={(e) => {
+                            e.stopPropagation() // The row's own click handler would toggle it back.
+                            toggle()
+                          }}
+                        >
+                          <span aria-hidden="true">{expanded ? '▾' : '▸'}</span> {u.user.name || u.user.email}
+                        </button>
+                        <div className="muted">{u.user.email}</div>
+                      </td>
+                      <TotalsCell totals={u.totals} />
+                      {groups.map((g) => (
+                        <Fragment key={g.plan}>
+                          {g.accounts.map((c) => (
+                            <TotalsCell key={c.id} totals={u.by_account.find((a) => a.account.id === c.id)?.totals} />
+                          ))}
+                          {hasSubtotal(g) && <TotalsCell totals={planSubtotal(u.by_account, g.plan)} />}
+                        </Fragment>
                       ))}
-                      {hasSubtotal(g) && <TotalsCell totals={planSubtotal(u.by_account, g.plan)} />}
-                    </Fragment>
-                  ))}
-                </tr>
-                {open === u.user.id && (
-                  <tr>
-                    <td colSpan={2 + groups.reduce((n, g) => n + groupSpan(g), 0)}>
-                      <UserSessions userId={u.user.id} />
-                    </td>
-                  </tr>
-                )}
-              </Fragment>
-            ))}
-          </tbody>
-        </table>
+                    </tr>
+                    {expanded && (
+                      <tr id={sessionsId}>
+                        <td colSpan={2 + groups.reduce((n, g) => n + groupSpan(g), 0)}>
+                          <UserSessions userId={u.user.id} />
+                        </td>
+                      </tr>
+                    )}
+                  </Fragment>
+                )
+              })}
+            </tbody>
+          </table>
+        </div>
       </section>
       <section className="card">
         <h2>Daily estimated cost per login</h2>
