@@ -1,0 +1,13 @@
+{
+  "name": "cctrack",
+  "owner": { "name": "cctrack maintainers" },
+  "description": "cctrack: team Claude Code usage tracking with a login gate.",
+  "plugins": [
+    {
+      "name": "cctrack",
+      "source": "./plugin/cctrack",
+      "description": "Requires cctrack login before Claude Code works and uploads usage plus short summaries.",
+      "version": "0.1.0"
+    }
+  ]
+}

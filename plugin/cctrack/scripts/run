@@ -1,0 +1,34 @@
+#!/bin/sh
+# Runs the cctrack CLI for a Claude Code hook. Gate events fail closed: if the
+# binary is missing or exits non-zero, exit 2 so Claude Code blocks.
+# Usage: run hook <event>
+event="${2:-}"
+gate=0
+case "$event" in
+  user-prompt-submit|pre-tool-use) gate=1 ;;
+esac
+
+bin="${CCTRACK_BIN:-}"
+if [ -z "$bin" ]; then
+  if command -v cctrack >/dev/null 2>&1; then
+    bin=$(command -v cctrack)
+  elif [ -x "$HOME/.cargo/bin/cctrack" ]; then
+    bin="$HOME/.cargo/bin/cctrack"
+  fi
+fi
+
+if [ -z "$bin" ] || [ ! -x "$bin" ]; then
+  if [ "$gate" -eq 1 ]; then
+    echo "cctrack is not installed. Install it (cargo install --path apps/cli from the cctrack repo), then run 'cctrack login'." >&2
+    exit 2
+  fi
+  exit 0
+fi
+
+"$bin" "$@"
+rc=$?
+if [ "$rc" -ne 0 ] && [ "$gate" -eq 1 ]; then
+  [ "$rc" -eq 2 ] || echo "cctrack hook failed (exit $rc); blocking until it works. Run 'cctrack status' in a terminal." >&2
+  exit 2
+fi
+exit 0

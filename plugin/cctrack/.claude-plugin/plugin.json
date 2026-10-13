@@ -1,0 +1,6 @@
+{
+  "name": "cctrack",
+  "version": "0.1.0",
+  "description": "Requires cctrack login before Claude Code works, and uploads token usage and short work summaries to your team's cctrack dashboard.",
+  "author": { "name": "cctrack maintainers" }
+}
