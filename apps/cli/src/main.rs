@@ -43,6 +43,16 @@ enum Cmd {
     Logout,
     /// Show who the server thinks you are.
     Whoami,
+    /// Handle a Claude Code hook event (reads hook JSON on stdin).
+    Hook { event: cctrack::hook::HookEvent },
+    /// Sync this session and attach a short summary of the work done.
+    Upload {
+        #[arg(long)]
+        summary: String,
+        /// Claude Code session id (defaults to the most recently started session).
+        #[arg(long)]
+        session: Option<String>,
+    },
 }
 
 fn main() -> ExitCode {
@@ -102,6 +112,19 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 Err(e) => Err(e.into()),
             }
         }
+        Cmd::Hook { event } => {
+            let mut input = String::new();
+            std::io::Read::read_to_string(&mut std::io::stdin(), &mut input)?;
+            let spawn = |args: &[String]| {
+                let _ = cctrack::detach::spawn(args);
+            };
+            let out = cctrack::hook::run(&paths, event, &input, chrono::Utc::now(), &spawn)?;
+            if !out.is_empty() {
+                println!("{out}");
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        Cmd::Upload { summary, session } => upload(&paths, &summary, session),
     }
 }
 
@@ -181,5 +204,45 @@ fn log_error(paths: &Paths, msg: &str) {
     let _ = std::fs::create_dir_all(&paths.state_dir);
     if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(paths.sync_log()) {
         let _ = writeln!(f, "{} {msg}", chrono::Utc::now().to_rfc3339());
+    }
+}
+
+fn upload(paths: &Paths, summary: &str, session: Option<String>) -> Result<ExitCode> {
+    use cctrack::client::{ApiClient, ApiError};
+    use cctrack::state::{LastSession, read_json};
+
+    let AuthState::LoggedIn(creds) = credentials::load(paths) else {
+        anyhow::bail!("not logged in — run `cctrack login`");
+    };
+    let summary = summary.trim();
+    if summary.is_empty() || summary.chars().count() > 500 {
+        anyhow::bail!("summary must be 1-500 characters");
+    }
+    let last: Option<LastSession> = read_json(&paths.last_session());
+    let session_id = session
+        .or_else(|| last.as_ref().map(|l| l.session_id.clone()))
+        .ok_or_else(|| anyhow::anyhow!("no session id known; pass --session <id>"))?;
+    let transcript = last
+        .filter(|l| l.session_id == session_id)
+        .and_then(|l| l.transcript_path)
+        .map(std::path::PathBuf::from)
+        .or_else(|| cctrack::scan::find_transcript(&paths.projects_dir(), &session_id));
+
+    let client = ApiClient::new(&creds.server, Some(&creds.token));
+    let opts = cctrack::sync::SyncOptions { transcript, wait_for_lock: std::time::Duration::from_secs(30) };
+    cctrack::sync::run(paths, &creds, &client, &opts, chrono::Utc::now())?;
+    match client.set_summary(&session_id, summary) {
+        Ok(()) => {
+            println!("cctrack: summary uploaded for session {session_id}");
+            Ok(ExitCode::SUCCESS)
+        }
+        Err(ApiError::NotFound(_)) => {
+            anyhow::bail!("the server has no usage recorded for session {session_id} yet (no model calls since login?)")
+        }
+        Err(ApiError::Unauthorized(_)) => {
+            credentials::mark_invalid(paths)?;
+            anyhow::bail!("your token was revoked or expired — run `cctrack login`")
+        }
+        Err(e) => Err(e.into()),
     }
 }
