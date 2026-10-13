@@ -8,6 +8,7 @@ use std::time::SystemTime;
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::state::{read_json, write_json_atomic};
 
@@ -79,9 +80,49 @@ pub fn find_transcript(projects_dir: &Path, session_id: &str) -> Option<PathBuf>
     fs::read_dir(projects_dir).ok()?.flatten().map(|p| p.path().join(format!("{session_id}.jsonl"))).find(|p| p.is_file())
 }
 
+/// How far into a transcript has been uploaded, and which file that was.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+#[serde(from = "StoredPosition")]
+pub struct Position {
+    pub offset: u64,
+    /// Device and inode of the file when `offset` was recorded.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dev: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ino: Option<u64>,
+    /// Hash of the bytes just before `offset` (see [`fingerprint_before`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fingerprint: Option<String>,
+}
+
+/// On-disk forms of [`Position`]: older versions stored a plain offset.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum StoredPosition {
+    Legacy(u64),
+    Full {
+        offset: u64,
+        #[serde(default)]
+        dev: Option<u64>,
+        #[serde(default)]
+        ino: Option<u64>,
+        #[serde(default)]
+        fingerprint: Option<String>,
+    },
+}
+
+impl From<StoredPosition> for Position {
+    fn from(s: StoredPosition) -> Self {
+        match s {
+            StoredPosition::Legacy(offset) => Position { offset, ..Default::default() },
+            StoredPosition::Full { offset, dev, ino, fingerprint } => Position { offset, dev, ino, fingerprint },
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Default, Debug)]
 pub struct Offsets {
-    files: BTreeMap<String, u64>,
+    files: BTreeMap<String, Position>,
 }
 
 impl Offsets {
@@ -91,38 +132,78 @@ impl Offsets {
     pub fn save(&self, path: &Path) -> Result<()> {
         write_json_atomic(path, self, None)
     }
-    pub fn get(&self, file: &Path) -> u64 {
-        self.files.get(&file.to_string_lossy().into_owned()).copied().unwrap_or(0)
+    pub fn get(&self, file: &Path) -> Position {
+        self.files.get(&file.to_string_lossy().into_owned()).cloned().unwrap_or_default()
     }
-    pub fn set(&mut self, file: &Path, offset: u64) {
-        self.files.insert(file.to_string_lossy().into_owned(), offset);
+    pub fn set(&mut self, file: &Path, pos: Position) {
+        self.files.insert(file.to_string_lossy().into_owned(), pos);
     }
 }
 
 #[derive(Debug, PartialEq)]
 pub struct NewLines {
     pub lines: Vec<String>,
-    /// Byte offset just past the last complete line read.
-    pub end: u64,
+    /// Where reading started: the stored offset, or 0 after a rewrite.
+    pub start: u64,
+    /// Position just past the last complete line read.
+    pub end: Position,
 }
 
-/// Reads complete lines after `offset`. A file shorter than `offset` was
-/// rewritten, so reading restarts at 0 (the server dedupes re-sent entries).
-pub fn read_new_lines(path: &Path, offset: u64) -> io::Result<NewLines> {
+/// How many bytes before an offset are hashed into its fingerprint.
+pub const FINGERPRINT_BYTES: u64 = 256;
+
+/// sha256 (first 16 hex chars) of up to [`FINGERPRINT_BYTES`] bytes
+/// immediately before `offset`.
+pub fn fingerprint_before(f: &mut File, offset: u64) -> io::Result<String> {
+    let from = offset.saturating_sub(FINGERPRINT_BYTES);
+    f.seek(SeekFrom::Start(from))?;
+    let mut buf = vec![0u8; (offset - from) as usize];
+    f.read_exact(&mut buf)?;
+    Ok(Sha256::digest(&buf)[..8].iter().map(|b| format!("{b:02x}")).collect())
+}
+
+#[cfg(unix)]
+fn identity(meta: &fs::Metadata) -> (Option<u64>, Option<u64>) {
+    use std::os::unix::fs::MetadataExt;
+    (Some(meta.dev()), Some(meta.ino()))
+}
+
+#[cfg(not(unix))]
+fn identity(_: &fs::Metadata) -> (Option<u64>, Option<u64>) {
+    (None, None)
+}
+
+/// Reads complete lines after `stored`. Reading restarts at 0 (the server
+/// dedupes re-sent entries) when the file was rewritten: it is shorter than
+/// the offset, is a different file (device/inode), or the bytes before the
+/// offset no longer match the stored fingerprint.
+pub fn read_new_lines(path: &Path, stored: &Position) -> io::Result<NewLines> {
     let mut f = File::open(path)?;
-    let len = f.metadata()?.len();
-    let start = if offset > len { 0 } else { offset };
+    let meta = f.metadata()?;
+    let len = meta.len();
+    let (dev, ino) = identity(&meta);
+    let other_file = (stored.dev.is_some() && stored.dev != dev) || (stored.ino.is_some() && stored.ino != ino);
+    let mut start = stored.offset;
+    if start > len || other_file {
+        start = 0;
+    } else if start > 0
+        && let Some(fp) = &stored.fingerprint
+        && fingerprint_before(&mut f, start)? != *fp
+    {
+        start = 0;
+    }
     f.seek(SeekFrom::Start(start))?;
     let mut buf = Vec::new();
     f.read_to_end(&mut buf)?;
-    let Some(last_nl) = buf.iter().rposition(|&b| b == b'\n') else {
-        return Ok(NewLines { lines: vec![], end: start });
+    let (lines, end) = match buf.iter().rposition(|&b| b == b'\n') {
+        None => (vec![], start),
+        Some(last_nl) => {
+            let text = String::from_utf8_lossy(&buf[..=last_nl]);
+            (text.lines().filter(|l| !l.trim().is_empty()).map(String::from).collect(), start + last_nl as u64 + 1)
+        }
     };
-    let text = String::from_utf8_lossy(&buf[..=last_nl]);
-    Ok(NewLines {
-        lines: text.lines().filter(|l| !l.trim().is_empty()).map(String::from).collect(),
-        end: start + last_nl as u64 + 1,
-    })
+    let fingerprint = Some(fingerprint_before(&mut f, end)?);
+    Ok(NewLines { lines, start, end: Position { offset: end, dev, ino, fingerprint } })
 }
 
 #[cfg(test)]
@@ -164,20 +245,25 @@ mod tests {
         assert!(discover(&dir.path().join("projects"), Some(future)).is_empty());
     }
 
+    fn at(offset: u64) -> Position {
+        Position { offset, ..Default::default() }
+    }
+
     #[test]
     fn reads_only_complete_lines_and_resumes() {
         let dir = tempfile::tempdir().unwrap();
         let f = dir.path().join("t.jsonl");
         fs::write(&f, "one\ntwo\npart").unwrap();
-        let r = read_new_lines(&f, 0).unwrap();
+        let r = read_new_lines(&f, &Position::default()).unwrap();
         assert_eq!(r.lines, vec!["one", "two"]);
-        assert_eq!(r.end, 8);
-        let r2 = read_new_lines(&f, r.end).unwrap();
+        assert_eq!(r.end.offset, 8);
+        let r2 = read_new_lines(&f, &r.end).unwrap();
         assert!(r2.lines.is_empty());
-        assert_eq!(r2.end, 8, "partial line is not consumed");
+        assert_eq!(r2.end, r.end, "partial line is not consumed");
         fs::write(&f, "one\ntwo\npartial\n").unwrap();
-        let r3 = read_new_lines(&f, 8).unwrap();
+        let r3 = read_new_lines(&f, &r.end).unwrap();
         assert_eq!(r3.lines, vec!["partial"]);
+        assert_eq!(r3.start, 8, "append-only growth resumes at the offset");
     }
 
     #[test]
@@ -185,9 +271,65 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let f = dir.path().join("t.jsonl");
         fs::write(&f, "a\n").unwrap();
-        let r = read_new_lines(&f, 999).unwrap();
+        let r = read_new_lines(&f, &at(999)).unwrap();
         assert_eq!(r.lines, vec!["a"]);
-        assert_eq!(r.end, 2);
+        assert_eq!(r.end.offset, 2);
+    }
+
+    #[test]
+    fn same_size_rewrite_is_reread() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("t.jsonl");
+        fs::write(&f, "aaa\nbbb\n").unwrap();
+        let first = read_new_lines(&f, &Position::default()).unwrap();
+        fs::write(&f, "ccc\nddd\n").unwrap(); // same length, same inode
+        let r = read_new_lines(&f, &first.end).unwrap();
+        assert_eq!((r.start, r.lines), (0, vec!["ccc".to_string(), "ddd".to_string()]));
+    }
+
+    #[test]
+    fn larger_rewrite_is_reread() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("t.jsonl");
+        fs::write(&f, "aaa\nbbb\n").unwrap();
+        let first = read_new_lines(&f, &Position::default()).unwrap();
+        fs::write(&f, "xxx\nyyy\nzzz\n").unwrap();
+        let r = read_new_lines(&f, &first.end).unwrap();
+        assert_eq!(r.start, 0);
+        assert_eq!(r.lines, vec!["xxx", "yyy", "zzz"]);
+    }
+
+    #[test]
+    fn replaced_file_with_new_inode_is_reread() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("t.jsonl");
+        let tail = "t".repeat(300) + "\n";
+        fs::write(&f, format!("a\n{tail}")).unwrap();
+        let first = read_new_lines(&f, &Position::default()).unwrap();
+        // Replaced by rename (new inode) with identical content: re-read from 0.
+        let tmp = dir.path().join("t.tmp");
+        fs::write(&tmp, format!("a\n{tail}")).unwrap();
+        fs::rename(&tmp, &f).unwrap();
+        let r = read_new_lines(&f, &first.end).unwrap();
+        assert_eq!(r.start, 0);
+        assert_eq!(r.lines.len(), 2);
+    }
+
+    #[test]
+    fn legacy_plain_offsets_still_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = dir.path().join("offsets.json");
+        fs::write(&store, r#"{"files":{"/x":42,"/y":{"offset":7,"dev":1,"ino":2,"fingerprint":"abcd"}}}"#).unwrap();
+        let o = Offsets::load(&store);
+        assert_eq!(o.get(Path::new("/x")), at(42));
+        assert_eq!(o.get(Path::new("/y")), Position { offset: 7, dev: Some(1), ino: Some(2), fingerprint: Some("abcd".into()) });
+
+        // A legacy offset is trusted (no fingerprint yet) and upgraded on the next read.
+        let f = dir.path().join("t.jsonl");
+        fs::write(&f, "aaa\nbbb\n").unwrap();
+        let r = read_new_lines(&f, &at(4)).unwrap();
+        assert_eq!((r.start, r.lines), (4, vec!["bbb".to_string()]));
+        assert!(r.end.fingerprint.is_some() && r.end.ino.is_some());
     }
 
     #[test]
@@ -195,9 +337,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = dir.path().join("state/offsets.json");
         let mut o = Offsets::load(&store);
-        assert_eq!(o.get(Path::new("/x")), 0);
-        o.set(Path::new("/x"), 42);
+        assert_eq!(o.get(Path::new("/x")), Position::default());
+        let pos = Position { offset: 42, dev: Some(3), ino: Some(9), fingerprint: Some("00ff".into()) };
+        o.set(Path::new("/x"), pos.clone());
         o.save(&store).unwrap();
-        assert_eq!(Offsets::load(&store).get(Path::new("/x")), 42);
+        assert_eq!(Offsets::load(&store).get(Path::new("/x")), pos);
     }
 }

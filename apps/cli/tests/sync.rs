@@ -163,8 +163,8 @@ fn unauthorized_marks_credentials_invalid_and_keeps_offsets() {
     assert!(sync::run(&fx.paths, &fx.creds, &client, &opts(), now()).is_err());
     assert!(matches!(credentials::load(&fx.paths), AuthState::Invalid(_)));
     let offsets = Offsets::load(&fx.paths.offsets());
-    assert_eq!(offsets.get(&fx.transcript), 0, "main transcript offset must not advance");
-    assert_eq!(offsets.get(&subagent_path(&fx)), 0, "subagent offset must not advance");
+    assert_eq!(offsets.get(&fx.transcript).offset, 0, "main transcript offset must not advance");
+    assert_eq!(offsets.get(&subagent_path(&fx)).offset, 0, "subagent offset must not advance");
     // Offsets did not advance: the same entries are attempted again.
     let err = sync::run(&fx.paths, &fx.creds, &client, &opts(), now()).unwrap_err();
     assert!(err.to_string().contains("cctrack login"));
@@ -241,7 +241,7 @@ fn batches_respect_server_session_limit() {
         assert!((0..520).all(|i| ids.contains(&format!("auto_msg_{i}"))));
     }
     let offsets = Offsets::load(&fx.paths.offsets());
-    assert_eq!(offsets.get(&many), fs::metadata(&many).unwrap().len());
+    assert_eq!(offsets.get(&many).offset, fs::metadata(&many).unwrap().len());
 
     // Everything was committed: a second run sends nothing.
     let report = sync::run(&fx.paths, &fx.creds, &client, &opts(), now()).unwrap();
@@ -283,7 +283,7 @@ fn batches_respect_server_account_limit() {
         }
     }
     assert!((0..30).all(|i| accounts.contains(&format!("acct-{i}"))));
-    assert_eq!(Offsets::load(&fx.paths.offsets()).get(&f), fs::metadata(&f).unwrap().len());
+    assert_eq!(Offsets::load(&fx.paths.offsets()).get(&f).offset, fs::metadata(&f).unwrap().len());
     mock.assert();
 }
 
@@ -374,9 +374,9 @@ fn deterministic_rejection_quarantines_only_the_offending_session() {
 
     // Offsets advanced for every file: accepted or quarantined.
     let offsets = Offsets::load(&fx.paths.offsets());
-    assert_eq!(offsets.get(&bad), fs::metadata(&bad).unwrap().len());
-    assert_eq!(offsets.get(&subagent_path(&fx)), fs::metadata(subagent_path(&fx)).unwrap().len());
-    assert!(offsets.get(&fx.transcript) > 0);
+    assert_eq!(offsets.get(&bad).offset, fs::metadata(&bad).unwrap().len());
+    assert_eq!(offsets.get(&subagent_path(&fx)).offset, fs::metadata(subagent_path(&fx)).unwrap().len());
+    assert!(offsets.get(&fx.transcript).offset > 0);
 
     let q = sync::Quarantine::load(&fx.paths.quarantine());
     assert!(q.contains("bad") && !q.contains("sess-1"));
@@ -389,7 +389,7 @@ fn deterministic_rejection_quarantines_only_the_offending_session() {
     let report = sync::run(&fx.paths, &fx.creds, &client, &opts(), now()).unwrap();
     assert_eq!(report.entries_sent, 0);
     assert_eq!(report.batches, 0);
-    assert_eq!(Offsets::load(&fx.paths.offsets()).get(&bad), fs::metadata(&bad).unwrap().len());
+    assert_eq!(Offsets::load(&fx.paths.offsets()).get(&bad).offset, fs::metadata(&bad).unwrap().len());
     mock.assert();
 }
 
@@ -403,8 +403,8 @@ fn server_error_keeps_offsets_and_quarantines_nothing() {
     let err = sync::run(&fx.paths, &fx.creds, &client, &opts(), now()).unwrap_err();
     assert!(err.to_string().contains("500"), "{err}");
     let offsets = Offsets::load(&fx.paths.offsets());
-    assert_eq!(offsets.get(&fx.transcript), 0);
-    assert_eq!(offsets.get(&subagent_path(&fx)), 0);
+    assert_eq!(offsets.get(&fx.transcript).offset, 0);
+    assert_eq!(offsets.get(&subagent_path(&fx)).offset, 0);
     assert!(!fx.paths.quarantine().exists());
     assert!(!fx.paths.last_snapshot().exists());
     mock.assert();
@@ -424,5 +424,25 @@ fn stale_unauthorized_does_not_invalidate_a_newer_login() {
         AuthState::LoggedIn(c) => assert_eq!(c.token, "cct_newer"),
         other => panic!("newer login must stay valid, got {other:?}"),
     }
+    mock.assert();
+}
+
+#[test]
+fn same_size_rewrite_is_uploaded_again() {
+    let fx = fixture();
+    let (server, mock, bodies) = recording_server(2);
+    let client = ApiClient::new(&server.url(), Some("cct_test"));
+    let f = fx.paths.projects_dir().join("-home-dev-rw/rw.jsonl");
+    fs::create_dir_all(f.parent().unwrap()).unwrap();
+    fs::write(&f, line("rw", "rw_a", "2026-10-01T10:00:00Z") + "\n").unwrap();
+    sync::run(&fx.paths, &fx.creds, &client, &opts(), now()).unwrap();
+
+    // Rewritten in place with different content of exactly the same length.
+    let replaced = line("rw", "rw_b", "2026-10-01T10:00:00Z") + "\n";
+    assert_eq!(replaced.len() as u64, fs::metadata(&f).unwrap().len());
+    fs::write(&f, &replaced).unwrap();
+    let report = sync::run(&fx.paths, &fx.creds, &client, &opts(), now()).unwrap();
+    assert_eq!(report.entries_sent, 1);
+    assert_eq!(bodies.lock().unwrap()[1]["entries"][0]["message_id"], "rw_b");
     mock.assert();
 }

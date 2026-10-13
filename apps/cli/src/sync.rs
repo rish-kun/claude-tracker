@@ -14,7 +14,7 @@ use crate::claude_json::{self, ClaudeState, OAuthAccount, UsageSnapshot};
 use crate::client::{ApiClient, ApiError};
 use crate::credentials::{self, Credentials};
 use crate::paths::Paths;
-use crate::scan::{self, Offsets};
+use crate::scan::{self, Offsets, Position};
 use crate::state::{read_json, write_json_atomic};
 use crate::timeline::{self, Timeline};
 use crate::transcript::{self, UsageEntry};
@@ -230,7 +230,7 @@ pub fn build_request(
 struct Batch {
     entries: Vec<UsageEntry>,
     /// Files whose last pending entry is in this batch, with their new offsets.
-    completes: Vec<(PathBuf, u64)>,
+    completes: Vec<(PathBuf, Position)>,
     /// Distinct session ids and account uuids, bounded by the server's limits.
     sessions: HashSet<String>,
     accounts: HashSet<String>,
@@ -273,11 +273,14 @@ pub fn run(paths: &Paths, creds: &Credentials, client: &ApiClient, opts: &SyncOp
     let mut quarantine = Quarantine::load(&paths.quarantine());
     let mut offsets = Offsets::load(&paths.offsets());
     let mut seen = HashSet::new();
-    let mut pending: Vec<(PathBuf, u64, Vec<UsageEntry>)> = Vec::new();
+    let mut pending: Vec<(PathBuf, Position, Vec<UsageEntry>)> = Vec::new();
     for f in &files {
-        let start = offsets.get(&f.path);
-        let Ok(new) = scan::read_new_lines(&f.path, start) else { continue };
-        if new.end == start {
+        let stored = offsets.get(&f.path);
+        let Ok(new) = scan::read_new_lines(&f.path, &stored) else { continue };
+        if new.lines.is_empty() {
+            if new.end != stored {
+                offsets.set(&f.path, new.end); // rewritten, or an older offsets format
+            }
             continue;
         }
         report.files_read += 1;
@@ -385,7 +388,7 @@ pub fn run(paths: &Paths, creds: &Credentials, client: &ApiClient, opts: &SyncOp
         }
         // Every entry of this batch is now accepted or quarantined.
         for (path, end) in &batch.completes {
-            offsets.set(path, *end);
+            offsets.set(path, end.clone());
         }
         offsets.save(&paths.offsets())?;
         if let Some(s) = snap {
