@@ -12,7 +12,7 @@ use chrono::{DateTime, Utc};
 use reqwest::Url;
 use sha2::{Digest, Sha256};
 
-use crate::client::ApiClient;
+use crate::client::{ApiClient, ApiError};
 use crate::credentials::{self, AuthState, Credentials};
 use crate::paths::Paths;
 use crate::sync::hostname;
@@ -37,8 +37,24 @@ pub fn random_state() -> String {
     b64(&rand::random::<[u8; 24]>())
 }
 
+/// Checks that `server` is an absolute http(s) URL with a host and returns it
+/// without trailing slashes. Catches values like `cctrack.example.com` (no
+/// scheme) and `localhost:3000` (parses as an opaque URL with scheme
+/// "localhost"), which would otherwise panic or produce an unusable link.
+pub fn validate_server(server: &str) -> Result<String> {
+    let ok = Url::parse(server).is_ok_and(|u| {
+        matches!(u.scheme(), "http" | "https") && !u.cannot_be_a_base() && u.host_str().is_some_and(|h| !h.is_empty())
+    });
+    if !ok {
+        bail!("invalid server URL '{server}': include the scheme, e.g. https://cctrack.example.com");
+    }
+    Ok(server.trim_end_matches('/').to_string())
+}
+
+/// `server` must already have passed [`validate_server`].
 pub fn start_url(server: &str, port: Option<u16>, state: &str, challenge: &str) -> String {
-    let mut url = Url::parse(&format!("{}/api/auth/cli/start", server.trim_end_matches('/'))).expect("valid server URL");
+    let mut url = Url::parse(&format!("{}/api/auth/cli/start", server.trim_end_matches('/')))
+        .expect("server URL was checked by validate_server");
     {
         let mut q = url.query_pairs_mut();
         match port {
@@ -113,7 +129,8 @@ pub fn wait_for_callback(listener: &TcpListener, expected_state: &str, timeout: 
 }
 
 pub fn login(paths: &Paths, server: &str, paste: bool, now: DateTime<Utc>) -> Result<Credentials> {
-    let server = server.trim_end_matches('/');
+    let server = validate_server(server)?;
+    let server = server.as_str();
     let pk = pkce();
     let state = random_state();
     let code = if paste {
@@ -149,6 +166,32 @@ pub fn login(paths: &Paths, server: &str, paste: bool, now: DateTime<Utc>) -> Re
     credentials::save(paths, &creds)?;
     timeline::observe_current(paths, now);
     Ok(creds)
+}
+
+#[derive(Debug)]
+pub enum LogoutOutcome {
+    /// The server revoked the token, or already considered it invalid.
+    Revoked,
+    /// No local credentials existed.
+    NotLoggedIn,
+    /// Local credentials were deleted, but the server-side token may still be live.
+    RevokeFailed(ApiError),
+}
+
+/// Revokes this device's token on the server, then deletes local credentials
+/// regardless of whether the revoke succeeded.
+pub fn logout(paths: &Paths) -> Result<LogoutOutcome> {
+    let outcome = match credentials::load(paths) {
+        AuthState::LoggedIn(c) | AuthState::Invalid(c) => {
+            match ApiClient::new(&c.server, Some(&c.token)).revoke_own_token() {
+                Ok(()) | Err(ApiError::Unauthorized(_)) => LogoutOutcome::Revoked,
+                Err(e) => LogoutOutcome::RevokeFailed(e),
+            }
+        }
+        AuthState::LoggedOut => LogoutOutcome::NotLoggedIn,
+    };
+    credentials::delete(paths)?;
+    Ok(outcome)
 }
 
 
@@ -208,6 +251,95 @@ mod tests {
         let err = wait_for_callback(&listener, "xyz", Duration::from_secs(5)).unwrap_err();
         assert!(err.to_string().contains("state"));
         assert!(client.join().unwrap().starts_with("HTTP/1.1 400"));
+    }
+
+    #[test]
+    fn validate_server_rejects_schemeless_and_opaque() {
+        for bad in ["cctrack.example.com", "localhost:3000", "ftp://c.example.com", "https://", "mailto:a@b.c", ""] {
+            let err = validate_server(bad).unwrap_err().to_string();
+            assert!(err.contains("invalid server URL"), "{bad}: {err}");
+            assert!(err.contains("include the scheme"), "{bad}: {err}");
+        }
+    }
+
+    #[test]
+    fn validate_server_accepts_http_and_https() {
+        assert_eq!(validate_server("https://c.example.com").unwrap(), "https://c.example.com");
+        assert_eq!(validate_server("http://localhost:8080").unwrap(), "http://localhost:8080");
+        assert_eq!(validate_server("https://c.example.com/").unwrap(), "https://c.example.com");
+    }
+
+    #[test]
+    fn login_rejects_bad_server_before_any_io() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::under(dir.path());
+        let err = login(&paths, "localhost:3000", false, Utc::now()).unwrap_err();
+        assert!(err.to_string().contains("invalid server URL 'localhost:3000'"), "{err}");
+    }
+
+    fn saved_creds(paths: &Paths, server: &str) {
+        let creds = Credentials {
+            server: server.into(),
+            token: "cct_abc".into(),
+            user: crate::credentials::UserInfo { id: 1, email: "dev@example.com".into(), name: "Dev".into() },
+            logged_in_at: Utc::now(),
+            invalid: false,
+        };
+        credentials::save(paths, &creds).unwrap();
+    }
+
+    fn logout_with_status(status: usize) -> (LogoutOutcome, AuthState) {
+        let mut server = mockito::Server::new();
+        let mock = server
+            .mock("DELETE", "/api/auth/token")
+            .match_header("authorization", "Bearer cct_abc")
+            .with_status(status)
+            .with_body(r#"{"error":"nope"}"#)
+            .create();
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::under(dir.path());
+        saved_creds(&paths, &server.url());
+        let out = logout(&paths).unwrap();
+        mock.assert();
+        (out, credentials::load(&paths))
+    }
+
+    #[test]
+    fn logout_revoked_deletes_credentials() {
+        let (out, auth) = logout_with_status(204);
+        assert!(matches!(out, LogoutOutcome::Revoked));
+        assert!(matches!(auth, AuthState::LoggedOut));
+    }
+
+    #[test]
+    fn logout_unauthorized_counts_as_revoked() {
+        let (out, auth) = logout_with_status(401);
+        assert!(matches!(out, LogoutOutcome::Revoked));
+        assert!(matches!(auth, AuthState::LoggedOut));
+    }
+
+    #[test]
+    fn logout_server_error_reports_failure_but_deletes_credentials() {
+        let (out, auth) = logout_with_status(500);
+        assert!(matches!(out, LogoutOutcome::RevokeFailed(ApiError::Http(500, _))));
+        assert!(matches!(auth, AuthState::LoggedOut));
+    }
+
+    #[test]
+    fn logout_network_error_reports_failure_but_deletes_credentials() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::under(dir.path());
+        // Bind then drop to get a local port nothing listens on.
+        let port = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        saved_creds(&paths, &format!("http://127.0.0.1:{port}"));
+        assert!(matches!(logout(&paths).unwrap(), LogoutOutcome::RevokeFailed(ApiError::Network(_))));
+        assert!(matches!(credentials::load(&paths), AuthState::LoggedOut));
+    }
+
+    #[test]
+    fn logout_when_logged_out() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(matches!(logout(&Paths::under(dir.path())).unwrap(), LogoutOutcome::NotLoggedIn));
     }
 
     #[test]

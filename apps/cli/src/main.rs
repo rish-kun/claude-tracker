@@ -73,12 +73,18 @@ fn run(cli: Cli) -> Result<ExitCode> {
             Ok(ExitCode::SUCCESS)
         }
         Cmd::Logout => {
-            if let AuthState::LoggedIn(c) | AuthState::Invalid(c) = credentials::load(&paths) {
-                let _ = cctrack::client::ApiClient::new(&c.server, Some(&c.token)).revoke_own_token();
-            }
-            credentials::delete(&paths)?;
+            use cctrack::login::LogoutOutcome;
+            let outcome = cctrack::login::logout(&paths)?;
             println!("cctrack: logged out");
-            Ok(ExitCode::SUCCESS)
+            match outcome {
+                LogoutOutcome::Revoked | LogoutOutcome::NotLoggedIn => Ok(ExitCode::SUCCESS),
+                LogoutOutcome::RevokeFailed(e) => {
+                    eprintln!(
+                        "cctrack: could not revoke this device's token on the server ({e}); revoke it from the dashboard's Settings page"
+                    );
+                    Ok(ExitCode::FAILURE)
+                }
+            }
         }
         Cmd::Whoami => {
             let AuthState::LoggedIn(c) = credentials::load(&paths) else {
