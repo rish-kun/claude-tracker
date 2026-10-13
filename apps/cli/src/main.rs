@@ -21,6 +21,15 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
+    /// Upload new usage from Claude Code transcripts.
+    Sync {
+        /// Only sync this session transcript (used by hooks).
+        #[arg(long)]
+        transcript: Option<std::path::PathBuf>,
+        /// Log errors to the state dir instead of stderr (used by hooks).
+        #[arg(long)]
+        quiet: bool,
+    },
 }
 
 fn main() -> ExitCode {
@@ -38,6 +47,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
     let paths = Paths::from_env()?;
     match cli.cmd {
         Cmd::Status { json } => status(&paths, json),
+        Cmd::Sync { transcript, quiet } => sync_cmd(&paths, transcript, quiet),
     }
 }
 
@@ -80,4 +90,42 @@ fn status(paths: &Paths, json: bool) -> Result<ExitCode> {
         }
     }
     Ok(if logged_in { ExitCode::SUCCESS } else { ExitCode::FAILURE })
+}
+
+fn sync_cmd(paths: &Paths, transcript: Option<std::path::PathBuf>, quiet: bool) -> Result<ExitCode> {
+    let AuthState::LoggedIn(creds) = credentials::load(paths) else {
+        if !quiet {
+            eprintln!("cctrack: not logged in — run `cctrack login`");
+        }
+        return Ok(ExitCode::FAILURE);
+    };
+    let client = cctrack::client::ApiClient::new(&creds.server, Some(&creds.token));
+    let opts = cctrack::sync::SyncOptions {
+        transcript,
+        wait_for_lock: if quiet { std::time::Duration::ZERO } else { std::time::Duration::from_secs(30) },
+    };
+    match cctrack::sync::run(paths, &creds, &client, &opts, chrono::Utc::now()) {
+        Ok(r) if !quiet => {
+            if r.skipped_locked {
+                println!("cctrack: another sync is running");
+            } else {
+                println!("cctrack: sent {} entries ({} new, {} already recorded)", r.entries_sent, r.accepted, r.duplicates);
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        Ok(_) => Ok(ExitCode::SUCCESS),
+        Err(e) if quiet => {
+            log_error(paths, &format!("{e:#}"));
+            Ok(ExitCode::FAILURE)
+        }
+        Err(e) => Err(e),
+    }
+}
+
+fn log_error(paths: &Paths, msg: &str) {
+    use std::io::Write;
+    let _ = std::fs::create_dir_all(&paths.state_dir);
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(paths.sync_log()) {
+        let _ = writeln!(f, "{} {msg}", chrono::Utc::now().to_rfc3339());
+    }
 }

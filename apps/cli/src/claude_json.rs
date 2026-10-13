@@ -37,6 +37,15 @@ pub fn read(path: &Path) -> ClaudeState {
     std::fs::read(path).map(|b| parse(&b)).unwrap_or_default()
 }
 
+/// Like `read`, but None when the file is missing or not valid JSON. Claude
+/// Code rewrites this file often, so a torn read must not be mistaken for
+/// "no oauthAccount" (API-key auth).
+pub fn read_checked(path: &Path) -> Option<ClaudeState> {
+    let bytes = std::fs::read(path).ok()?;
+    serde_json::from_slice::<serde::de::IgnoredAny>(&bytes).ok()?;
+    Some(parse(&bytes))
+}
+
 fn str_field(v: &Value, key: &str) -> Option<String> {
     v.get(key).and_then(Value::as_str).filter(|s| !s.is_empty()).map(String::from)
 }
@@ -122,5 +131,20 @@ mod tests {
         let st = parse(br#"{"cachedUsageUtilization": {"accountUuid": "a", "fetchedAtMs": 1, "utilization": {"five_hour": {"utilization": "high"}}}}"#);
         assert!(st.snapshot.is_none(), "non-numeric utilization is ignored");
         assert_eq!(read(std::path::Path::new("/definitely/missing.json")), ClaudeState::default());
+    }
+
+    #[test]
+    fn read_checked_distinguishes_unreadable_from_no_account() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("claude.json");
+        assert_eq!(read_checked(&p), None, "missing file");
+        std::fs::write(&p, br#"{"oauthAccount": {"accountUuid": "acc"#).unwrap();
+        assert_eq!(read_checked(&p), None, "truncated JSON");
+        std::fs::write(&p, b"").unwrap();
+        assert_eq!(read_checked(&p), None, "empty file");
+        std::fs::write(&p, b"{}").unwrap();
+        assert_eq!(read_checked(&p), Some(ClaudeState::default()), "valid JSON without oauthAccount");
+        std::fs::write(&p, SAMPLE).unwrap();
+        assert_eq!(read_checked(&p), Some(parse(SAMPLE.as_bytes())));
     }
 }
