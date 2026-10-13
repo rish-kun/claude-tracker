@@ -29,3 +29,28 @@ export function useMySessions(page: number) {
     placeholderData: (prev) => prev,
   })
 }
+
+export function useByLogin(r: Range) {
+  return useQuery({
+    queryKey: ['admin', 'by-login', rangeKey(r)],
+    queryFn: () => unwrap(api.GET('/admin/by-login', { params: { query: rangeQuery(r) } })),
+  })
+}
+
+export function useByAccount(r: Range) {
+  return useQuery({
+    queryKey: ['admin', 'by-account', rangeKey(r)],
+    queryFn: () => unwrap(api.GET('/admin/by-account', { params: { query: rangeQuery(r) } })),
+  })
+}
+
+export function useUserSessions(userId: number, page: number) {
+  return useQuery({
+    queryKey: ['admin', 'user-sessions', userId, page],
+    queryFn: () =>
+      unwrap(api.GET('/admin/users/{id}/sessions', {
+        params: { path: { id: userId }, query: { limit: PAGE_SIZE, offset: page * PAGE_SIZE } },
+      })),
+    placeholderData: (prev) => prev,
+  })
+}

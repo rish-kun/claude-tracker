@@ -4,7 +4,7 @@ import { costLabel, formatDateTime, formatTokens, PLAN_LABELS, unpricedTitle } f
 import { Empty } from './charts'
 
 /** Cost cell that never shows a bare $0 for unpriced usage; the marker's title explains it. */
-function Cost({ totals }: { totals: Totals }) {
+export function Cost({ totals }: { totals: Totals }) {
   const label = costLabel(totals)
   if (totals.unpriced_tokens === 0) return <>{label}</>
   const title = unpricedTitle(totals.unpriced_tokens)
@@ -23,6 +23,12 @@ function Cost({ totals }: { totals: Totals }) {
       </span>
     </>
   )
+}
+
+/** Caption under a cost chart whose series can't be marked individually as unpriced. */
+export function UnpricedNote({ tokens }: { tokens: number }) {
+  if (tokens <= 0) return null
+  return <div className="muted">Excludes {formatTokens(tokens)} tokens from unpriced models.</div>
 }
 
 export function Kpis({ totals, sessions }: { totals: Totals; sessions?: number }) {
