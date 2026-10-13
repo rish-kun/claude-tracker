@@ -65,6 +65,8 @@ func TestNoDBRequestHandling(t *testing.T) {
 		{"short challenge", "GET", "/api/auth/cli/start?port=5555&state=abcdefghijklmnop&code_challenge=tooshort", "", nil, 400, "code_challenge"},
 		{"param bind error is JSON 400", "GET", "/api/auth/cli/start?port=abc&state=abcdefghijklmnop&code_challenge=" + ch, "", nil, 400, "port"},
 		{"stub is 501", "GET", "/api/admin/prices", "", nil, 501, "not implemented"},
+		{"anonymous usage", "GET", "/api/me/usage?from=2026-10-01T00:00:00Z&to=2026-10-02T00:00:00Z", "", nil, 401, "not logged in"},
+		{"anonymous sessions", "GET", "/api/me/sessions", "", nil, 401, "not logged in"},
 		{"anonymous ingest", "POST", "/api/ingest", "{}", nil, 401, "not logged in"},
 		{"anonymous summary", "POST", "/api/sessions/s1/summary", `{"summary":"x"}`, nil, 401, "not logged in"},
 		{"cookie POST without CSRF header", "POST", "/api/auth/logout", "", []string{"Cookie", sessionCookie + "=bogus"}, 403, "X-CCTrack"},
