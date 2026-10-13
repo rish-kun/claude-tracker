@@ -24,7 +24,7 @@ function AccountCard({ d, range }: { d: AccountDetail; range: Range }) {
       <div className="grid2">
         <div>
           <h2>Share of this account</h2>
-          <ShareDonut data={d.by_user.map((u) => ({ name: u.user.email, value: u.totals.cost_usd }))} format={formatUSD} />
+          <ShareDonut data={d.by_user.map((u) => ({ name: u.user.email, value: u.share }))} format={formatPct} />
           <UnpricedNote tokens={d.totals.unpriced_tokens} />
           <table>
             <thead>

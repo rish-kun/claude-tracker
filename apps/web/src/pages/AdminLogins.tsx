@@ -3,11 +3,23 @@ import { useByLogin, useUserSessions } from '../api/hooks'
 import { AdminOnly } from '../components/AdminOnly'
 import { StackedDaily, UserAccountBars } from '../components/charts'
 import { Cost, SessionsTable, UnpricedNote } from '../components/tables'
-import { accountColumns, planGroups } from '../lib/accounts'
+import type { Totals } from '../api/client'
+import { accountColumns, groupSpan, hasSubtotal, planGroups, planSubtotal } from '../lib/accounts'
 import { formatTokens, formatUSD, PLAN_LABELS } from '../lib/format'
 import { pivot } from '../lib/pivot'
 import { datesBetween } from '../lib/range'
 import { useRange } from '../lib/rangeContext'
+
+/** Cost over tokens; a dash when the login has no usage there. */
+function TotalsCell({ totals }: { totals?: Totals }) {
+  if (!totals) return <td className="num">—</td>
+  return (
+    <td className="num">
+      <Cost totals={totals} />
+      <div className="muted">{formatTokens(totals.total_tokens)}</div>
+    </td>
+  )
+}
 
 function UserSessions({ userId }: { userId: number }) {
   const [page, setPage] = useState(0)
@@ -49,12 +61,17 @@ function Content() {
               <th rowSpan={2}>Login</th>
               <th rowSpan={2} className="num">Total</th>
               {groups.map((g) => (
-                <th key={g.plan} colSpan={g.count}>{PLAN_LABELS[g.plan]}</th>
+                <th key={g.plan} colSpan={groupSpan(g)}>{PLAN_LABELS[g.plan]}</th>
               ))}
             </tr>
             <tr>
-              {columns.map((c) => (
-                <th key={c.id} className="num">{c.label}</th>
+              {groups.map((g) => (
+                <Fragment key={g.plan}>
+                  {g.accounts.map((c) => (
+                    <th key={c.id} className="num">{c.label}</th>
+                  ))}
+                  {hasSubtotal(g) && <th className="num">All {PLAN_LABELS[g.plan]}</th>}
+                </Fragment>
               ))}
             </tr>
           </thead>
@@ -66,23 +83,19 @@ function Content() {
                     {u.user.name || u.user.email}
                     <div className="muted">{u.user.email}</div>
                   </td>
-                  <td className="num">
-                    <Cost totals={u.totals} />
-                    <div className="muted">{formatTokens(u.totals.total_tokens)}</div>
-                  </td>
-                  {columns.map((c) => {
-                    const cell = u.by_account.find((a) => a.account.id === c.id)
-                    return (
-                      <td key={c.id} className="num">
-                        {cell ? <Cost totals={cell.totals} /> : '—'}
-                        {cell && <div className="muted">{formatTokens(cell.totals.total_tokens)}</div>}
-                      </td>
-                    )
-                  })}
+                  <TotalsCell totals={u.totals} />
+                  {groups.map((g) => (
+                    <Fragment key={g.plan}>
+                      {g.accounts.map((c) => (
+                        <TotalsCell key={c.id} totals={u.by_account.find((a) => a.account.id === c.id)?.totals} />
+                      ))}
+                      {hasSubtotal(g) && <TotalsCell totals={planSubtotal(u.by_account, g.plan)} />}
+                    </Fragment>
+                  ))}
                 </tr>
                 {open === u.user.id && (
                   <tr>
-                    <td colSpan={2 + columns.length}>
+                    <td colSpan={2 + groups.reduce((n, g) => n + groupSpan(g), 0)}>
                       <UserSessions userId={u.user.id} />
                     </td>
                   </tr>
