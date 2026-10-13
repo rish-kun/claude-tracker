@@ -24,7 +24,9 @@ Create a Neon project (or connect Neon through the Vercel marketplace). You need
 
 1. Import this repository as a Vercel project. `vercel.json` defines two services:
    `/api/*` → the Go server in `apps/server`, everything else → the Vite app in `apps/web`.
-2. Set environment variables:
+2. In Project Settings → Build and Deployment, set Framework Preset to **Services** and leave
+   Root Directory as the repository root. (Without this Vercel ignores the `services` key.)
+3. Set environment variables:
 
 | Variable | Example | Notes |
 |---|---|---|
@@ -33,12 +35,14 @@ Create a Neon project (or connect Neon through the Vercel marketplace). You need
 | `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | | from step 1 |
 | `SESSION_SECRET` | output of `openssl rand -base64 48` | ≥ 32 bytes |
 | `PUBLIC_URL` | `https://cctrack.example.com` | no trailing slash |
-| `ALLOWED_DOMAINS` | `example.com` | Google Workspace domains (checked via the `hd` claim) |
+| `ALLOWED_DOMAINS` | `example.com` | Google Workspace domains (checked via the `hd` claim), comma-separated |
 | `ALLOWED_EMAILS` | `contractor@gmail.com` | individual addresses, comma-separated |
 | `ADMIN_EMAILS` | `you@example.com` | can see everyone's usage |
 | `AUTO_MIGRATE` | `true` | run migrations on startup (or run `make migrate` yourself) |
 
-3. Deploy, then open `PUBLIC_URL` and sign in.
+   At least one of `ALLOWED_DOMAINS` / `ALLOWED_EMAILS` is required: the server refuses to
+   start otherwise rather than let every Google account sign in.
+4. Deploy, then open `PUBLIC_URL` and sign in.
 
 ## 4. Install the CLI (each developer)
 
@@ -56,6 +60,9 @@ In Claude Code:
 /plugin marketplace add <github-org>/<repo>
 /plugin install cctrack@cctrack
 ```
+If the repository is private, each developer needs git read access to it for
+`/plugin marketplace add` to work.
+
 From then on Claude Code refuses to work until `cctrack login` has succeeded, uploads
 token usage after every turn, and attaches short summaries of completed work.
 
@@ -70,13 +77,17 @@ Admins can make the plugin mandatory with Claude Code **managed settings**
   "extraKnownMarketplaces": {
     "cctrack": { "source": { "source": "github", "repo": "<github-org>/<repo>" } }
   },
-  "enabledPlugins": { "cctrack@cctrack": true },
-  "allowManagedHooksOnly": true
+  "enabledPlugins": { "cctrack@cctrack": true }
 }
 ```
-`enabledPlugins` in managed settings force-enables the plugin so users cannot turn it
-off, and `allowManagedHooksOnly` stops user-level hooks from overriding it (hooks from
-force-enabled plugins are exempt, so cctrack's hooks still run).
+`enabledPlugins` in managed settings force-enables the plugin so users cannot turn it off.
+
+**Optional hardening:** also add `"allowManagedHooksOnly": true`. This blocks every user,
+project and local hook, and hooks from any plugin that is not force-enabled in managed
+settings. cctrack's hooks still run because the plugin is force-enabled. Trade-offs: developers
+lose all their own hooks, and `statusLine` and `fileSuggestion` also become managed-only, so
+custom status lines and file-suggestion commands stop working unless you set them in managed
+settings too.
 
 ## Local development
 
