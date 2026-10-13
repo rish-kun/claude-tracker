@@ -30,6 +30,17 @@ impl fmt::Display for ApiError {
 
 impl std::error::Error for ApiError {}
 
+/// Whether credentials may be sent to `url`: https anywhere, plain http only
+/// to a loopback host (local development).
+pub fn is_secure_server(url: &Url) -> bool {
+    match url.scheme() {
+        "https" => true,
+        // The URL parser lowercases domains and normalises IPs ("127.1" → "127.0.0.1").
+        "http" => matches!(url.host_str(), Some("localhost" | "127.0.0.1" | "[::1]")),
+        _ => false,
+    }
+}
+
 pub struct ApiClient {
     base: String,
     token: Option<String>,
@@ -48,6 +59,12 @@ impl ApiClient {
 
     fn url(&self, segments: &[&str]) -> Result<Url, ApiError> {
         let mut url = Url::parse(&self.base).map_err(|e| ApiError::Network(format!("bad server URL: {e}")))?;
+        if !is_secure_server(&url) {
+            return Err(ApiError::Network(format!(
+                "refusing to send credentials to {} over plain http; use https (http is only allowed for localhost)",
+                self.base
+            )));
+        }
         url.path_segments_mut()
             .map_err(|_| ApiError::Network("bad server URL".into()))?
             .pop_if_empty()
@@ -111,5 +128,26 @@ impl ApiClient {
         let url = self.url(&["auth", "token"])?;
         self.send::<serde_json::Value>(self.http.delete(url))?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn plain_http_only_for_loopback() {
+        for ok in ["https://c.example.com", "http://localhost:3000", "http://127.0.0.1:9", "http://[::1]:8080", "http://LOCALHOST", "http://127.1"] {
+            assert!(is_secure_server(&Url::parse(ok).unwrap()), "{ok}");
+        }
+        for bad in ["http://c.example.com", "http://10.0.0.5", "http://127.0.0.2", "http://localhost.evil.com", "http://[::2]", "ftp://c.example.com"] {
+            assert!(!is_secure_server(&Url::parse(bad).unwrap()), "{bad}");
+        }
+    }
+
+    #[test]
+    fn client_refuses_plain_http_to_remote_hosts() {
+        let err = ApiClient::new("http://c.example.com", Some("cct_x")).me().unwrap_err();
+        assert!(matches!(&err, ApiError::Network(m) if m.contains("plain http")), "{err}");
     }
 }
