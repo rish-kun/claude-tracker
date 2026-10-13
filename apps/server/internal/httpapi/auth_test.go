@@ -1,6 +1,8 @@
 package httpapi
 
 import (
+	"errors"
+	"fmt"
 	"net/http"
 	"net/url"
 	"strings"
@@ -163,5 +165,49 @@ func TestBadBearerIs401AndAnonymousIs401(t *testing.T) {
 	}
 	if rec := h.do("GET", "/api/me", nil); rec.Code != http.StatusUnauthorized {
 		t.Fatalf("anonymous: %d", rec.Code)
+	}
+}
+
+// TestLoginStartPendingCap: once maxPendingAuthRequests sign-ins are pending,
+// both login starts answer 503 without inserting; expired rows do not count.
+func TestLoginStartPendingCap(t *testing.T) {
+	h := newHarness(t)
+	h.exec(fmt.Sprintf(`INSERT INTO auth_requests (state, mode, expires_at)
+		SELECT 'flood-' || g, 'web', now() + interval '10 minutes' FROM generate_series(1, %d) g`, maxPendingAuthRequests))
+	_, challenge := pkcePair()
+	cli := "/api/auth/cli/start?port=5555&state=abcdefghijklmnop&code_challenge=" + challenge
+	for _, path := range []string{cli, "/api/auth/web/start"} {
+		rec := h.do("GET", path, nil)
+		if rec.Code != http.StatusServiceUnavailable ||
+			decode[map[string]string](t, rec)["error"] != "too many pending sign-ins, try again shortly" {
+			t.Fatalf("%s at cap: %d %s", path, rec.Code, rec.Body)
+		}
+	}
+	var n int
+	h.scan("SELECT count(*) FROM auth_requests", &n)
+	if n != maxPendingAuthRequests {
+		t.Fatalf("rows = %d, want %d (no insert at cap)", n, maxPendingAuthRequests)
+	}
+	h.exec("UPDATE auth_requests SET expires_at = now() - interval '1 minute' WHERE state = 'flood-1'")
+	if rec := h.do("GET", "/api/auth/web/start", nil); rec.Code != http.StatusFound {
+		t.Fatalf("below cap: %d %s", rec.Code, rec.Body)
+	}
+}
+
+// TestCallbackExchangeErrorIsGeneric runs the real callback with a failing IdP.
+func TestCallbackExchangeErrorIsGeneric(t *testing.T) {
+	h := newHarness(t)
+	logs := captureLog(t)
+	_, challenge := pkcePair()
+	rec := h.do("GET", "/api/auth/cli/start?mode=paste&state=abcdefghijklmnop&code_challenge="+challenge, nil)
+	state := locationParam(t, rec, "state")
+	h.idp.err = errors.New("verify id_token: secret-detail-xyz")
+	rec = h.do("GET", "/api/auth/google/callback?code=g&state="+url.QueryEscape(state), nil)
+	if rec.Code != http.StatusBadGateway || strings.Contains(rec.Body.String(), "secret-detail-xyz") ||
+		!strings.Contains(rec.Body.String(), "Google sign-in failed; please try again.") {
+		t.Fatalf("callback: %d %s", rec.Code, rec.Body)
+	}
+	if !strings.Contains(logs.String(), "secret-detail-xyz") {
+		t.Fatalf("detail not logged: %q", logs)
 	}
 }

@@ -73,28 +73,50 @@ func (s *Store) UpdateAccount(ctx context.Context, id int64, label, plan *string
 	return a, err
 }
 
-// UpsertPrice inserts or replaces the price row for p.Model.
-func (s *Store) UpsertPrice(ctx context.Context, p pricing.Price) (pricing.Price, error) {
+const insertPrice = `
+	INSERT INTO model_prices (model, input, cache_write_5m, cache_write_1h, cache_read, output,
+	  fast_input, fast_output, long_input, long_cache_write_5m, long_cache_write_1h, long_cache_read, long_output, updated_at)
+	VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, now())`
+
+const returningPrice = `
+	RETURNING model, input, cache_write_5m, cache_write_1h, cache_read, output, fast_input, fast_output,
+	  long_input, long_cache_write_5m, long_cache_write_1h, long_cache_read, long_output, updated_at`
+
+func priceArgs(p pricing.Price) []any {
 	var li, l5, l1, lr, lo *float64
 	if p.Long != nil {
 		li, l5, l1, lr, lo = &p.Long.Input, &p.Long.CacheWrite5m, &p.Long.CacheWrite1h, &p.Long.CacheRead, &p.Long.Output
 	}
-	rows, err := s.pool.Query(ctx, `
-		INSERT INTO model_prices (model, input, cache_write_5m, cache_write_1h, cache_read, output,
-		  fast_input, fast_output, long_input, long_cache_write_5m, long_cache_write_1h, long_cache_read, long_output, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, now())
+	return []any{p.Model, p.Base.Input, p.Base.CacheWrite5m, p.Base.CacheWrite1h, p.Base.CacheRead, p.Base.Output,
+		p.FastInput, p.FastOutput, li, l5, l1, lr, lo}
+}
+
+// UpsertPrice inserts or replaces the price row for p.Model.
+func (s *Store) UpsertPrice(ctx context.Context, p pricing.Price) (pricing.Price, error) {
+	rows, err := s.pool.Query(ctx, insertPrice+`
 		ON CONFLICT (model) DO UPDATE SET
 		  input = EXCLUDED.input, cache_write_5m = EXCLUDED.cache_write_5m, cache_write_1h = EXCLUDED.cache_write_1h,
 		  cache_read = EXCLUDED.cache_read, output = EXCLUDED.output, fast_input = EXCLUDED.fast_input,
 		  fast_output = EXCLUDED.fast_output, long_input = EXCLUDED.long_input,
 		  long_cache_write_5m = EXCLUDED.long_cache_write_5m, long_cache_write_1h = EXCLUDED.long_cache_write_1h,
-		  long_cache_read = EXCLUDED.long_cache_read, long_output = EXCLUDED.long_output, updated_at = now()
-		RETURNING model, input, cache_write_5m, cache_write_1h, cache_read, output, fast_input, fast_output,
-		  long_input, long_cache_write_5m, long_cache_write_1h, long_cache_read, long_output, updated_at`,
-		p.Model, p.Base.Input, p.Base.CacheWrite5m, p.Base.CacheWrite1h, p.Base.CacheRead, p.Base.Output,
-		p.FastInput, p.FastOutput, li, l5, l1, lr, lo)
+		  long_cache_read = EXCLUDED.long_cache_read, long_output = EXCLUDED.long_output, updated_at = now()`+
+		returningPrice, priceArgs(p)...)
 	if err != nil {
 		return pricing.Price{}, err
 	}
 	return pgx.CollectExactlyOneRow(rows, scanPrice)
+}
+
+// CreatePrice inserts a price row for p.Model, returning ErrConflict without
+// writing anything when the model already has one.
+func (s *Store) CreatePrice(ctx context.Context, p pricing.Price) (pricing.Price, error) {
+	rows, err := s.pool.Query(ctx, insertPrice+` ON CONFLICT (model) DO NOTHING`+returningPrice, priceArgs(p)...)
+	if err != nil {
+		return pricing.Price{}, err
+	}
+	saved, err := pgx.CollectExactlyOneRow(rows, scanPrice)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return pricing.Price{}, ErrConflict
+	}
+	return saved, err
 }

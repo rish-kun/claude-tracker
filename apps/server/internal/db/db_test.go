@@ -21,4 +21,11 @@ func TestMigrateSeedsPricesAndIsIdempotent(t *testing.T) {
 	if err := db.Migrate(ctx, pool); err != nil {
 		t.Fatalf("second migrate: %v", err)
 	}
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM pg_indexes WHERE schemaname = current_schema()
+		AND indexname IN ('auth_requests_expires_at', 'cli_auth_codes_expires_at')`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 2 {
+		t.Fatalf("expires_at indexes = %d, want 2", n)
+	}
 }

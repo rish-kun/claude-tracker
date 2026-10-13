@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -127,9 +128,26 @@ func (s *Store) ConsumeCLICode(ctx context.Context, hash []byte) (int64, string,
 	return userID, challenge, err
 }
 
+// PendingAuthRequestsAtLeast reports whether at least n unexpired auth
+// requests exist. It counts at most n rows, so it stays cheap under a flood.
+func (s *Store) PendingAuthRequestsAtLeast(ctx context.Context, n int) (bool, error) {
+	var got int
+	err := s.pool.QueryRow(ctx, `
+		SELECT count(*) FROM (SELECT 1 FROM auth_requests WHERE expires_at > now() LIMIT $1) pending`, n).Scan(&got)
+	return got >= n, err
+}
+
+// PurgeBatch bounds how many rows one PurgeExpired call deletes per table, so
+// an unauthenticated login start never pays for an unbounded delete.
+const PurgeBatch = 1000
+
+// PurgeExpired deletes up to PurgeBatch expired rows from each auth table.
+// Both statements run in one argument-free Exec (simple protocol).
 func (s *Store) PurgeExpired(ctx context.Context) error {
-	_, err := s.pool.Exec(ctx, `
-		DELETE FROM auth_requests WHERE expires_at < now();
-		DELETE FROM cli_auth_codes WHERE expires_at < now() - interval '1 day';`)
+	_, err := s.pool.Exec(ctx, fmt.Sprintf(`
+		DELETE FROM auth_requests WHERE ctid IN (
+		  SELECT ctid FROM auth_requests WHERE expires_at < now() LIMIT %[1]d);
+		DELETE FROM cli_auth_codes WHERE ctid IN (
+		  SELECT ctid FROM cli_auth_codes WHERE expires_at < now() - interval '1 day' LIMIT %[1]d);`, PurgeBatch))
 	return err
 }

@@ -214,6 +214,10 @@ func (s *Server) AdminUpdateAccount(w http.ResponseWriter, r *http.Request, id i
 			writeError(w, http.StatusBadRequest, "label must be at most 100 characters")
 			return
 		}
+		if hasNUL(l) {
+			writeError(w, http.StatusBadRequest, "label must not contain NUL")
+			return
+		}
 		label = &l
 	}
 	if body.Plan != nil {
@@ -339,6 +343,9 @@ func priceFromBody(model string, body api.PriceRates) (pricing.Price, string) {
 	if model == "" {
 		return pricing.Price{}, "model is required"
 	}
+	if hasNUL(model) {
+		return pricing.Price{}, "model must not contain NUL"
+	}
 	rates := []float64{body.Input, body.CacheWrite5m, body.CacheWrite1h, body.CacheRead, body.Output}
 	optional := []*float64{body.FastInput, body.FastOutput,
 		body.LongInput, body.LongCacheWrite5m, body.LongCacheWrite1h, body.LongCacheRead, body.LongOutput}
@@ -379,12 +386,17 @@ func priceFromBody(model string, body api.PriceRates) (pricing.Price, string) {
 	return p, ""
 }
 
-func (s *Server) AdminPutPrice(w http.ResponseWriter, r *http.Request, model string) {
+func (s *Server) AdminPutPrice(w http.ResponseWriter, r *http.Request, model string, params api.AdminPutPriceParams) {
 	if _, ok := s.requireAdmin(w, r); !ok {
 		return
 	}
 	var body api.PriceRates
-	if !decodeJSON(w, r, &body) {
+	raw, ok := readJSON(w, r, &body)
+	if !ok {
+		return
+	}
+	if err := checkPriceKeys(raw); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	p, msg := priceFromBody(pricing.Normalize(model), body)
@@ -392,7 +404,15 @@ func (s *Server) AdminPutPrice(w http.ResponseWriter, r *http.Request, model str
 		writeError(w, http.StatusBadRequest, msg)
 		return
 	}
-	saved, err := s.store.UpsertPrice(r.Context(), p)
+	save := s.store.UpsertPrice
+	if params.Create != nil && *params.Create {
+		save = s.store.CreatePrice
+	}
+	saved, err := save(r.Context(), p)
+	if errors.Is(err, store.ErrConflict) {
+		writeError(w, http.StatusConflict, "model already priced: "+p.Model)
+		return
+	}
 	if err != nil {
 		s.internal(w, err)
 		return

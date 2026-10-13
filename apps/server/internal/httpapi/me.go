@@ -26,7 +26,7 @@ func series(g *report.Group[dayKey], label func(key string) string) []api.Series
 	for _, k := range keys {
 		b := g.Get(k)
 		out = append(out, api.SeriesPoint{Date: k.Day, Key: k.Key, Label: label(k.Key),
-			TotalTokens: b.Counts.Total(), CostUsd: b.Cost})
+			TotalTokens: b.Counts.Total(), CostUsd: b.Cost, UnpricedTokens: b.Unpriced})
 	}
 	return out
 }

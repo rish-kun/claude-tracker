@@ -31,7 +31,7 @@ Create a Neon project (or connect Neon through the Vercel marketplace). You need
 | Variable | Example | Notes |
 |---|---|---|
 | `DATABASE_URL` | `postgres://…-pooler…/neondb?sslmode=require` | pooled |
-| `DATABASE_URL_UNPOOLED` | `postgres://…/neondb?sslmode=require` | direct; migrations |
+| `DATABASE_URL_UNPOOLED` | `postgres://…/neondb?sslmode=require` | direct; migrations. Required when `DATABASE_URL` is a `-pooler` host: migrating through the pooler is refused |
 | `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | | from step 1 |
 | `SESSION_SECRET` | output of `openssl rand -base64 48` | ≥ 32 bytes |
 | `PUBLIC_URL` | `https://cctrack.example.com` | no trailing slash |
@@ -102,6 +102,8 @@ make dev-server                                  # Go API on :8080 (migrates whe
 make dev-web                                     # Vite on :5173, proxies /api
 make test                                        # all test suites
 ```
+Quote every value in `apps/server/.env` (e.g. `DATABASE_URL="postgres://…?sslmode=require&channel_binding=require"`):
+the Makefile sources the file with `sh`, so an unquoted `&`, space or `#` breaks it.
 Server DB tests need `TEST_DATABASE_URL` — a **direct** (non-pooled) Postgres URL; a Neon
 dev branch's unpooled string works. Without it the DB tests are skipped.
 `make db-up` starts a local Postgres in Docker if you prefer.
