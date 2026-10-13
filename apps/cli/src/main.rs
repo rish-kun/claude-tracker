@@ -190,24 +190,20 @@ fn sync_cmd(paths: &Paths, transcript: Option<std::path::PathBuf>, quiet: bool) 
             } else {
                 println!("cctrack: sent {} entries ({} new, {} already recorded)", r.entries_sent, r.accepted, r.duplicates);
             }
+            for id in &r.quarantined {
+                eprintln!("cctrack: the server refused session {id}; its usage was dropped and it will not be retried (see {})", paths.sync_log().display());
+            }
             Ok(ExitCode::SUCCESS)
         }
         Ok(_) => Ok(ExitCode::SUCCESS),
         Err(e) if quiet => {
-            log_error(paths, &format!("{e:#}"));
+            cctrack::sync::log(paths, &format!("{e:#}"));
             Ok(ExitCode::FAILURE)
         }
         Err(e) => Err(e),
     }
 }
 
-fn log_error(paths: &Paths, msg: &str) {
-    use std::io::Write;
-    let _ = std::fs::create_dir_all(&paths.state_dir);
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(paths.sync_log()) {
-        let _ = writeln!(f, "{} {msg}", chrono::Utc::now().to_rfc3339());
-    }
-}
 
 fn upload(paths: &Paths, summary: &str, session: Option<String>) -> Result<ExitCode> {
     use cctrack::client::{ApiClient, ApiError};

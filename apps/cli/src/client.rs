@@ -20,8 +20,8 @@ pub enum ApiError {
 impl fmt::Display for ApiError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            ApiError::Unauthorized(m) => write!(f, "unauthorized: {m}"),
-            ApiError::NotFound(m) => write!(f, "not found: {m}"),
+            ApiError::Unauthorized(m) => write!(f, "server returned 401: {m}"),
+            ApiError::NotFound(m) => write!(f, "server returned 404: {m}"),
             ApiError::Http(code, m) => write!(f, "server returned {code}: {m}"),
             ApiError::Network(m) => write!(f, "network error: {m}"),
         }

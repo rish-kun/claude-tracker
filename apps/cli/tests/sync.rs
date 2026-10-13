@@ -319,3 +319,93 @@ fn torn_claude_json_records_no_observation_and_sends_no_snapshot() {
     assert_eq!(bodies[1]["entries"][0]["account_uuid"], "acc-1", "attributed via the timeline");
     mock.assert();
 }
+
+/// A mock /api/ingest that refuses (403) any request containing session "bad",
+/// accepts everything else, and records every request body.
+fn refusing_server(expect: usize) -> (mockito::ServerGuard, mockito::Mock, Arc<Mutex<Vec<Value>>>) {
+    let mut server = mockito::Server::new();
+    let bodies: Arc<Mutex<Vec<Value>>> = Arc::default();
+    let sink = bodies.clone();
+    let has_bad = |req: &mockito::Request| {
+        let body: Value = serde_json::from_slice(req.body().unwrap()).unwrap();
+        body["sessions"].as_array().unwrap().iter().any(|s| s["session_id"] == "bad")
+    };
+    let mock = server
+        .mock("POST", "/api/ingest")
+        .with_status_code_from_request(move |req| if has_bad(req) { 403 } else { 200 })
+        .with_body_from_request(move |req| {
+            let body: Value = serde_json::from_slice(req.body().unwrap()).unwrap();
+            let n = body["entries"].as_array().unwrap().len();
+            let bad = has_bad(req);
+            sink.lock().unwrap().push(body);
+            if bad {
+                br#"{"error":"a session in this batch belongs to another user"}"#.to_vec()
+            } else {
+                format!(r#"{{"accepted":{n},"duplicates":0}}"#).into_bytes()
+            }
+        })
+        .expect(expect)
+        .create();
+    (server, mock, bodies)
+}
+
+#[test]
+fn deterministic_rejection_quarantines_only_the_offending_session() {
+    let fx = fixture();
+    let bad = fx.paths.projects_dir().join("-home-dev-other/bad.jsonl");
+    fs::create_dir_all(bad.parent().unwrap()).unwrap();
+    fs::write(&bad, [line("bad", "bad_1", "2026-10-01T10:00:00Z"), line("bad", "bad_2", "2026-10-01T10:01:00Z")].join("\n") + "\n").unwrap();
+
+    // Batch (403) → "bad" alone (403) → "sess-1" alone (200) → snapshot alone (200).
+    let (server, mock, bodies) = refusing_server(4);
+    let client = ApiClient::new(&server.url(), Some("cct_test"));
+    let report = sync::run(&fx.paths, &fx.creds, &client, &opts(), now()).unwrap();
+    assert_eq!(report.quarantined, vec!["bad".to_string()]);
+    assert_eq!(report.accepted, 2, "msg_1 + msg_3 accepted");
+    {
+        let bodies = bodies.lock().unwrap();
+        assert_eq!(bodies.len(), 4);
+        let ok: Vec<&Value> = bodies.iter().filter(|b| b["sessions"].as_array().unwrap().iter().all(|s| s["session_id"] != "bad")).collect();
+        let ids: Vec<&str> = ok.iter().flat_map(|b| b["entries"].as_array().unwrap()).map(|e| e["message_id"].as_str().unwrap()).collect();
+        assert_eq!(ids.len(), 2);
+        assert!(ids.contains(&"msg_1") && ids.contains(&"msg_3"));
+        assert!(ok.iter().any(|b| b.get("limit_snapshot").is_some()), "snapshot still delivered");
+    }
+
+    // Offsets advanced for every file: accepted or quarantined.
+    let offsets = Offsets::load(&fx.paths.offsets());
+    assert_eq!(offsets.get(&bad), fs::metadata(&bad).unwrap().len());
+    assert_eq!(offsets.get(&subagent_path(&fx)), fs::metadata(subagent_path(&fx)).unwrap().len());
+    assert!(offsets.get(&fx.transcript) > 0);
+
+    let q = sync::Quarantine::load(&fx.paths.quarantine());
+    assert!(q.contains("bad") && !q.contains("sess-1"));
+    assert_eq!(q.0["bad"].status, 403);
+    let log = fs::read_to_string(fx.paths.sync_log()).unwrap();
+    assert!(log.contains("quarantined session bad") && log.contains("HTTP 403"), "{log}");
+
+    // Nothing is retried; later entries of the quarantined session are skipped too.
+    fs::write(&bad, fs::read_to_string(&bad).unwrap() + &line("bad", "bad_3", "2026-10-01T11:00:00Z") + "\n").unwrap();
+    let report = sync::run(&fx.paths, &fx.creds, &client, &opts(), now()).unwrap();
+    assert_eq!(report.entries_sent, 0);
+    assert_eq!(report.batches, 0);
+    assert_eq!(Offsets::load(&fx.paths.offsets()).get(&bad), fs::metadata(&bad).unwrap().len());
+    mock.assert();
+}
+
+#[test]
+fn server_error_keeps_offsets_and_quarantines_nothing() {
+    let fx = fixture();
+    let mut server = mockito::Server::new();
+    let mock = server.mock("POST", "/api/ingest").with_status(500).with_body(r#"{"error":"db down"}"#).expect(1).create();
+    let client = ApiClient::new(&server.url(), Some("cct_test"));
+
+    let err = sync::run(&fx.paths, &fx.creds, &client, &opts(), now()).unwrap_err();
+    assert!(err.to_string().contains("500"), "{err}");
+    let offsets = Offsets::load(&fx.paths.offsets());
+    assert_eq!(offsets.get(&fx.transcript), 0);
+    assert_eq!(offsets.get(&subagent_path(&fx)), 0);
+    assert!(!fx.paths.quarantine().exists());
+    assert!(!fx.paths.last_snapshot().exists());
+    mock.assert();
+}

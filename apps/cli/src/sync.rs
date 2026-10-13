@@ -2,11 +2,13 @@
 
 use std::collections::{BTreeMap, HashSet};
 use std::fs::{self, File, OpenOptions, TryLockError};
-use std::path::PathBuf;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
-use anyhow::{Result, bail};
+use anyhow::{Result, anyhow};
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 
 use crate::claude_json::{self, ClaudeState, OAuthAccount, UsageSnapshot};
 use crate::client::{ApiClient, ApiError};
@@ -39,6 +41,58 @@ pub struct SyncReport {
     pub duplicates: i64,
     pub batches: usize,
     pub skipped_locked: bool,
+    /// Sessions the server deterministically rejected during this run; their
+    /// entries were dropped and they will not be sent again.
+    pub quarantined: Vec<String>,
+}
+
+/// Appends a timestamped line to `sync.log` (best effort).
+pub fn log(paths: &Paths, msg: &str) {
+    let _ = fs::create_dir_all(&paths.state_dir);
+    if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(paths.sync_log()) {
+        let _ = writeln!(f, "{} {msg}", Utc::now().to_rfc3339());
+    }
+}
+
+/// A session the server refused with a deterministic 4xx even on its own.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct QuarantinedSession {
+    pub at: DateTime<Utc>,
+    pub status: u16,
+    pub error: String,
+}
+
+/// Sessions never to upload again, keyed by session id (`quarantine.json`).
+#[derive(Serialize, Deserialize, Default, Debug)]
+#[serde(transparent)]
+pub struct Quarantine(pub BTreeMap<String, QuarantinedSession>);
+
+impl Quarantine {
+    pub fn load(path: &Path) -> Self {
+        read_json(path).unwrap_or_default()
+    }
+    pub fn contains(&self, session_id: &str) -> bool {
+        self.0.contains_key(session_id)
+    }
+}
+
+/// Errors that will recur no matter how often the same request is retried.
+fn deterministic(e: &ApiError) -> Option<u16> {
+    match e {
+        ApiError::Http(code @ (400 | 403 | 409 | 413 | 422), _) => Some(*code),
+        _ => None,
+    }
+}
+
+/// Converts a fatal upload error; a 401 also marks the credentials invalid.
+fn fatal(paths: &Paths, e: ApiError) -> anyhow::Error {
+    match e {
+        ApiError::Unauthorized(_) => match credentials::mark_invalid(paths) {
+            Ok(()) => anyhow!("the server rejected your token (revoked or expired; HTTP 401); run `cctrack login`"),
+            Err(m) => anyhow!("the server rejected your token (HTTP 401; also failed to record it: {m}); run `cctrack login`"),
+        },
+        e => e.into(),
+    }
 }
 
 pub fn hostname() -> String {
@@ -217,6 +271,7 @@ pub fn run(paths: &Paths, creds: &Credentials, client: &ApiClient, opts: &SyncOp
         }
     };
 
+    let mut quarantine = Quarantine::load(&paths.quarantine());
     let mut offsets = Offsets::load(&paths.offsets());
     let mut seen = HashSet::new();
     let mut pending: Vec<(PathBuf, u64, Vec<UsageEntry>)> = Vec::new();
@@ -232,6 +287,7 @@ pub fn run(paths: &Paths, creds: &Credentials, client: &ApiClient, opts: &SyncOp
             .iter()
             .filter_map(|l| transcript::parse_line(l, f.subagent, &f.session_hint))
             .filter(|e| e.ts >= creds.logged_in_at)
+            .filter(|e| !quarantine.contains(&e.session_id))
             .filter(|e| seen.insert(e.message_id.clone()))
             .collect();
         if entries.is_empty() {
@@ -286,19 +342,55 @@ pub fn run(paths: &Paths, creds: &Credentials, client: &ApiClient, opts: &SyncOp
                 report.entries_sent += batch.entries.len();
                 report.accepted += resp.accepted;
                 report.duplicates += resp.duplicates;
-                for (path, end) in &batch.completes {
-                    offsets.set(path, *end);
+            }
+            Err(e) => {
+                let Some(status) = deterministic(&e) else { return Err(fatal(paths, e)) };
+                // One bad session (e.g. HTTP 403: it belongs to another cctrack user
+                // after someone else logged in on this OS account) must not wedge
+                // every sync: retry per session and quarantine the ones still refused.
+                log(paths, &format!("ingest batch of {} entries rejected with HTTP {status} ({e}); retrying per session", batch.entries.len()));
+                let mut by_session: BTreeMap<&str, Vec<UsageEntry>> = BTreeMap::new();
+                for e in &batch.entries {
+                    by_session.entry(e.session_id.as_str()).or_default().push(e.clone());
                 }
-                offsets.save(&paths.offsets())?;
+                for (session_id, entries) in by_session {
+                    let req = build_request(&device, &entries, &timeline, &claude, None);
+                    match client.ingest(&req) {
+                        Ok(resp) => {
+                            report.batches += 1;
+                            report.entries_sent += entries.len();
+                            report.accepted += resp.accepted;
+                            report.duplicates += resp.duplicates;
+                        }
+                        Err(e) => {
+                            let Some(status) = deterministic(&e) else { return Err(fatal(paths, e)) };
+                            let error = e.to_string();
+                            log(paths, &format!("quarantined session {session_id}: dropped {} entries, HTTP {status} ({error})", entries.len()));
+                            quarantine.0.insert(session_id.to_string(), QuarantinedSession { at: now, status, error });
+                            write_json_atomic(&paths.quarantine(), &quarantine, None)?;
+                            report.quarantined.push(session_id.to_string());
+                        }
+                    }
+                }
                 if let Some(s) = snap {
-                    write_json_atomic(&paths.last_snapshot(), &s.fetched_at, None)?;
+                    let req = build_request(&device, &[], &timeline, &claude, Some(s));
+                    match client.ingest(&req) {
+                        Ok(_) => {}
+                        Err(e) => {
+                            let Some(status) = deterministic(&e) else { return Err(fatal(paths, e)) };
+                            log(paths, &format!("dropped limit snapshot captured at {}: HTTP {status} ({e})", s.fetched_at.to_rfc3339()));
+                        }
+                    }
                 }
             }
-            Err(ApiError::Unauthorized(_)) => {
-                credentials::mark_invalid(paths)?;
-                bail!("the server rejected your token (revoked or expired); run `cctrack login`");
-            }
-            Err(e) => return Err(e.into()),
+        }
+        // Every entry of this batch is now accepted or quarantined.
+        for (path, end) in &batch.completes {
+            offsets.set(path, *end);
+        }
+        offsets.save(&paths.offsets())?;
+        if let Some(s) = snap {
+            write_json_atomic(&paths.last_snapshot(), &s.fetched_at, None)?;
         }
     }
     Ok(report)
