@@ -1,16 +1,20 @@
 //! Claude Code hook handlers. The gate (UserPromptSubmit, PreToolUse) only
-//! reads local credentials so it is fast and works offline.
+//! reads local credentials so it is fast and works offline. SessionStart also
+//! checks the token online (with a short time limit) so a revoked login blocks
+//! the very first prompt.
 
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::credentials::{self, AuthState};
+use crate::client::{ApiClient, ApiError};
+use crate::credentials::{self, AuthState, Credentials};
 use crate::paths::Paths;
 use crate::state::{LastSession, write_json_atomic};
 use crate::timeline;
@@ -221,8 +225,33 @@ pub fn decide(event: HookEvent, input: &HookInput, gate: &Gate, bin: &TrustedBin
     }
 }
 
+/// How long SessionStart waits for the server to confirm the token.
+pub const SESSION_START_CHECK_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// The server's verdict on stored credentials.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TokenCheck {
+    Valid,
+    /// HTTP 401: revoked or expired.
+    Rejected,
+    /// No answer in time, network error, or any other failure: offline must
+    /// not block work, so the local credentials stand.
+    Unknown,
+}
+
+/// Checks `creds` against the server (`GET /api/me`) within `timeout`.
+pub fn check_token_online(creds: &Credentials, timeout: Duration) -> TokenCheck {
+    match ApiClient::with_timeout(&creds.server, Some(&creds.token), timeout).me() {
+        Ok(_) => TokenCheck::Valid,
+        Err(ApiError::Unauthorized(_)) => TokenCheck::Rejected,
+        Err(_) => TokenCheck::Unknown,
+    }
+}
+
 /// Runs a hook: records local state, decides, spawns any sync, and returns
-/// the JSON to print on stdout (possibly empty).
+/// the JSON to print on stdout (possibly empty). On SessionStart with stored
+/// credentials, `check_token` asks the server whether the token still works;
+/// the other events never touch the network.
 pub fn run(
     paths: &Paths,
     event: HookEvent,
@@ -230,9 +259,20 @@ pub fn run(
     now: DateTime<Utc>,
     bin: &TrustedBinary,
     spawn: &dyn Fn(&[String]),
+    check_token: &dyn Fn(&Credentials) -> TokenCheck,
 ) -> Result<String> {
     let input: HookInput = serde_json::from_str(input).unwrap_or_default();
     let gate = match credentials::load(paths) {
+        AuthState::LoggedIn(c) if event == HookEvent::SessionStart && check_token(&c) == TokenCheck::Rejected => {
+            // Record it so UserPromptSubmit blocks the first prompt. Only this
+            // token is marked: a newer login saved meanwhile stays valid.
+            let marked = credentials::mark_invalid(paths, &c.token);
+            match credentials::load(paths) {
+                AuthState::LoggedIn(n) if n.token != c.token => Gate::LoggedIn { email: n.user.email },
+                AuthState::LoggedOut if marked.is_ok() => Gate::LoggedOut,
+                _ => Gate::Revoked,
+            }
+        }
         AuthState::LoggedIn(c) => Gate::LoggedIn { email: c.user.email },
         AuthState::Invalid(_) => Gate::Revoked,
         AuthState::LoggedOut => Gate::LoggedOut,
@@ -271,6 +311,10 @@ mod tests {
     use crate::state::read_json;
     use std::path::Path;
     use std::cell::RefCell;
+
+    fn valid(_: &Credentials) -> TokenCheck {
+        TokenCheck::Valid
+    }
 
     fn bash(cmd: &str) -> HookInput {
         HookInput { tool_name: Some("Bash".into()), tool_input: Some(serde_json::json!({ "command": cmd })), ..Default::default() }
@@ -466,13 +510,13 @@ mod tests {
         let spawn = |args: &[String]| spawned.borrow_mut().push(args.to_vec());
 
         let out = run(&paths, HookEvent::SessionStart,
-            r#"{"session_id":"sess-1","transcript_path":"/t/sess-1.jsonl","cwd":"/p"}"#, Utc::now(), &fixed_bin(), &spawn).unwrap();
+            r#"{"session_id":"sess-1","transcript_path":"/t/sess-1.jsonl","cwd":"/p"}"#, Utc::now(), &fixed_bin(), &spawn, &valid).unwrap();
         assert!(out.contains("NOT LOGGED IN"));
         let last: LastSession = read_json(&paths.last_session()).unwrap();
         assert_eq!(last.session_id, "sess-1");
         assert!(spawned.borrow().is_empty(), "no sync while logged out");
 
-        let out = run(&paths, HookEvent::UserPromptSubmit, "garbage", Utc::now(), &fixed_bin(), &spawn).unwrap();
+        let out = run(&paths, HookEvent::UserPromptSubmit, "garbage", Utc::now(), &fixed_bin(), &spawn, &valid).unwrap();
         let v: Value = serde_json::from_str(&out).unwrap();
         assert_eq!(v["decision"], "block");
     }
@@ -496,17 +540,17 @@ mod tests {
         let spawned = RefCell::new(Vec::<Vec<String>>::new());
         let spawn = |args: &[String]| spawned.borrow_mut().push(args.to_vec());
 
-        let out = run(&paths, HookEvent::SessionStart, r#"{"session_id":"sess-2","transcript_path":"/t/sess-2.jsonl"}"#, Utc::now(), &fixed_bin(), &spawn).unwrap();
+        let out = run(&paths, HookEvent::SessionStart, r#"{"session_id":"sess-2","transcript_path":"/t/sess-2.jsonl"}"#, Utc::now(), &fixed_bin(), &spawn, &valid).unwrap();
         assert!(out.contains("dev@example.com") && out.contains("sess-2"));
         assert_eq!(*spawned.borrow(), vec![vec!["sync".to_string(), "--quiet".to_string()]]);
 
         spawned.borrow_mut().clear();
-        let out = run(&paths, HookEvent::Stop, r#"{"session_id":"sess-2","transcript_path":"/t/sess-2.jsonl"}"#, Utc::now(), &fixed_bin(), &spawn).unwrap();
+        let out = run(&paths, HookEvent::Stop, r#"{"session_id":"sess-2","transcript_path":"/t/sess-2.jsonl"}"#, Utc::now(), &fixed_bin(), &spawn, &valid).unwrap();
         assert_eq!(out, "");
         assert_eq!(*spawned.borrow(), vec![vec!["sync", "--quiet", "--transcript", "/t/sess-2.jsonl"].into_iter().map(String::from).collect::<Vec<_>>()]);
 
         spawned.borrow_mut().clear();
-        assert_eq!(run(&paths, HookEvent::UserPromptSubmit, "garbage", Utc::now(), &fixed_bin(), &spawn).unwrap(), "");
+        assert_eq!(run(&paths, HookEvent::UserPromptSubmit, "garbage", Utc::now(), &fixed_bin(), &spawn, &valid).unwrap(), "");
         assert!(spawned.borrow().is_empty());
     }
 
@@ -518,12 +562,115 @@ mod tests {
         let spawned = RefCell::new(Vec::<Vec<String>>::new());
         let spawn = |args: &[String]| spawned.borrow_mut().push(args.to_vec());
 
-        let out = run(&paths, HookEvent::UserPromptSubmit, r#"{"session_id":"s"}"#, Utc::now(), &fixed_bin(), &spawn).unwrap();
+        let out = run(&paths, HookEvent::UserPromptSubmit, r#"{"session_id":"s"}"#, Utc::now(), &fixed_bin(), &spawn, &valid).unwrap();
         let v: Value = serde_json::from_str(&out).unwrap();
         assert_eq!(v["decision"], "block");
         assert!(v["reason"].as_str().unwrap().contains("revoked"));
-        let out = run(&paths, HookEvent::Stop, r#"{"transcript_path":"/t/s.jsonl"}"#, Utc::now(), &fixed_bin(), &spawn).unwrap();
+        let out = run(&paths, HookEvent::Stop, r#"{"transcript_path":"/t/s.jsonl"}"#, Utc::now(), &fixed_bin(), &spawn, &valid).unwrap();
         assert_eq!(out, "");
         assert!(spawned.borrow().is_empty(), "no sync while revoked");
+    }
+
+    #[test]
+    fn session_start_401_revokes_and_blocks_the_first_prompt() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::under(dir.path());
+        save_creds(&paths, false);
+        let spawned = RefCell::new(Vec::<Vec<String>>::new());
+        let spawn = |args: &[String]| spawned.borrow_mut().push(args.to_vec());
+        let checked = RefCell::new(Vec::<String>::new());
+        let rejected = |c: &Credentials| {
+            checked.borrow_mut().push(c.token.clone());
+            TokenCheck::Rejected
+        };
+
+        let out = run(&paths, HookEvent::SessionStart, r#"{"session_id":"sess-3"}"#, Utc::now(), &fixed_bin(), &spawn, &rejected).unwrap();
+        let v: Value = serde_json::from_str(&out).unwrap();
+        let ctx = v["hookSpecificOutput"]["additionalContext"].as_str().unwrap();
+        assert!(ctx.contains("NOT LOGGED IN") && ctx.contains("revoked") && ctx.contains("Do not start"), "{ctx}");
+        assert!(!ctx.contains("dev@example.com"), "{ctx}");
+        assert_eq!(*checked.borrow(), vec!["tok".to_string()]);
+        assert!(spawned.borrow().is_empty(), "no sync for a revoked token");
+        assert!(matches!(credentials::load(&paths), AuthState::Invalid(c) if c.token == "tok"));
+
+        // The gate itself stays offline and now blocks the very first prompt.
+        let panic_check = |_: &Credentials| -> TokenCheck { panic!("the gate must not check online") };
+        let out = run(&paths, HookEvent::UserPromptSubmit, r#"{"session_id":"sess-3"}"#, Utc::now(), &fixed_bin(), &spawn, &panic_check).unwrap();
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["decision"], "block");
+        assert!(v["reason"].as_str().unwrap().contains("revoked"), "{v}");
+    }
+
+    #[test]
+    fn session_start_timeout_or_network_error_proceeds_as_logged_in() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::under(dir.path());
+        save_creds(&paths, false);
+        let spawned = RefCell::new(Vec::<Vec<String>>::new());
+        let spawn = |args: &[String]| spawned.borrow_mut().push(args.to_vec());
+        let unknown = |_: &Credentials| TokenCheck::Unknown;
+
+        let out = run(&paths, HookEvent::SessionStart, r#"{"session_id":"sess-4"}"#, Utc::now(), &fixed_bin(), &spawn, &unknown).unwrap();
+        assert!(out.contains("logged in as dev@example.com") && !out.contains("NOT LOGGED IN"), "{out}");
+        assert_eq!(*spawned.borrow(), vec![vec!["sync".to_string(), "--quiet".to_string()]]);
+        assert!(matches!(credentials::load(&paths), AuthState::LoggedIn(_)));
+    }
+
+    #[test]
+    fn only_session_start_with_credentials_checks_online() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::under(dir.path());
+        let spawn = |_: &[String]| {};
+        let panic_check = |_: &Credentials| -> TokenCheck { panic!("no online check expected") };
+        // Logged out: nothing to check.
+        run(&paths, HookEvent::SessionStart, "{}", Utc::now(), &fixed_bin(), &spawn, &panic_check).unwrap();
+        save_creds(&paths, false);
+        for ev in [HookEvent::UserPromptSubmit, HookEvent::PreToolUse, HookEvent::Stop, HookEvent::SessionEnd] {
+            run(&paths, ev, r#"{"tool_name":"Bash","tool_input":{"command":"ls"}}"#, Utc::now(), &fixed_bin(), &spawn, &panic_check).unwrap();
+        }
+        // Already marked invalid: no check either.
+        save_creds(&paths, true);
+        let out = run(&paths, HookEvent::SessionStart, "{}", Utc::now(), &fixed_bin(), &spawn, &panic_check).unwrap();
+        assert!(out.contains("revoked"), "{out}");
+    }
+
+    fn creds_for(server: &str) -> Credentials {
+        Credentials {
+            server: server.into(),
+            token: "tok".into(),
+            user: credentials::UserInfo { id: 1, email: "dev@example.com".into(), name: "Dev".into() },
+            logged_in_at: Utc::now(),
+            invalid: false,
+        }
+    }
+
+    #[test]
+    fn online_check_maps_server_answers() {
+        let mut server = mockito::Server::new();
+        let ok = server.mock("GET", "/api/me").match_header("authorization", "Bearer tok").with_status(200)
+            .with_body(r#"{"id":1,"email":"dev@example.com","name":"Dev","is_admin":false}"#).expect(1).create();
+        assert_eq!(check_token_online(&creds_for(&server.url()), SESSION_START_CHECK_TIMEOUT), TokenCheck::Valid);
+        ok.assert();
+        ok.remove();
+        let revoked = server.mock("GET", "/api/me").with_status(401).with_body(r#"{"error":"invalid or revoked token"}"#).expect(1).create();
+        assert_eq!(check_token_online(&creds_for(&server.url()), SESSION_START_CHECK_TIMEOUT), TokenCheck::Rejected);
+        revoked.assert();
+        revoked.remove();
+        server.mock("GET", "/api/me").with_status(500).create();
+        assert_eq!(check_token_online(&creds_for(&server.url()), SESSION_START_CHECK_TIMEOUT), TokenCheck::Unknown);
+        // Nothing listening.
+        assert_eq!(check_token_online(&creds_for("http://127.0.0.1:9"), SESSION_START_CHECK_TIMEOUT), TokenCheck::Unknown);
+    }
+
+    #[test]
+    fn online_check_gives_up_after_the_time_limit() {
+        // Accepts connections (via the backlog) but never answers.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let start = std::time::Instant::now();
+        assert_eq!(check_token_online(&creds_for(&url), SESSION_START_CHECK_TIMEOUT), TokenCheck::Unknown);
+        let took = start.elapsed();
+        assert!(took >= Duration::from_millis(1900) && took < Duration::from_secs(4), "{took:?}");
+        drop(listener);
     }
 }

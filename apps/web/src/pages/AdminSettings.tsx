@@ -162,7 +162,15 @@ function Tokens() {
   )
 }
 
-function RateInputs({ draft, onChange }: { draft: RateDraft; onChange: (d: RateDraft) => void }) {
+function RateInputs({
+  draft,
+  onChange,
+  disabled = false,
+}: {
+  draft: RateDraft
+  onChange: (d: RateDraft) => void
+  disabled?: boolean
+}) {
   return (
     <>
       {BASE_RATE_FIELDS.map((f) => (
@@ -173,6 +181,7 @@ function RateInputs({ draft, onChange }: { draft: RateDraft; onChange: (d: RateD
             inputMode="decimal"
             aria-label={f.label}
             value={draft[f.key]}
+            disabled={disabled}
             onChange={(e) => onChange({ ...draft, [f.key]: e.target.value })}
           />
         </td>
@@ -251,8 +260,12 @@ function AddPriceRow() {
           onChange={(e) => {
             setModel(e.target.value)
             setSaved(undefined)
-            put.reset() // a 409 for the previous id no longer applies
+            // A 409 for the previous id no longer applies. Never reset an
+            // in-flight Add: its "Saved"/409 feedback would be detached.
+            if (!put.isPending) put.reset()
           }}
+          // Locked while an Add is in flight so its result matches what is shown.
+          disabled={put.isPending}
           placeholder="New model id, e.g. claude-opus-6"
           aria-label="New model id"
           maxLength={200}
@@ -260,6 +273,7 @@ function AddPriceRow() {
       </td>
       <RateInputs
         draft={draft}
+        disabled={put.isPending}
         onChange={(d) => {
           setDraft(d)
           setSaved(undefined)

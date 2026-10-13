@@ -3,6 +3,7 @@ package db
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/url"
 	"strings"
@@ -57,10 +58,20 @@ func MigrateURL(ctx context.Context, url string) error {
 	return Migrate(ctx, pool)
 }
 
+// errUnparseableURL reports a malformed migration URL without echoing it (or
+// url.Parse's message, which quotes parts of it): it may contain a password.
+var errUnparseableURL = errors.New("migration database URL could not be parsed as a URL (not shown: it may " +
+	"contain credentials); check DATABASE_URL_UNPOOLED / DATABASE_URL")
+
 // CheckMigrateURL fails when raw targets a Neon pooled hostname ("-pooler"):
 // goose's session advisory lock does not work through a transaction pooler.
+// It also fails, without including the URL, when raw cannot be parsed.
 func CheckMigrateURL(raw string) error {
-	for _, host := range dbHosts(raw) {
+	hosts, ok := dbHosts(raw)
+	if !ok {
+		return errUnparseableURL
+	}
+	for _, host := range hosts {
 		if strings.Contains(strings.ToLower(host), "-pooler") {
 			return fmt.Errorf("migration database host %q is a Neon pooled endpoint; migrations need a direct "+
 				"connection: set DATABASE_URL_UNPOOLED to the unpooled connection string (host without -pooler)", host)
@@ -70,24 +81,25 @@ func CheckMigrateURL(raw string) error {
 }
 
 // dbHosts extracts the host(s) from a postgres:// URL or a keyword/value DSN.
-func dbHosts(raw string) []string {
+// ok is false (and no host is returned) when a URL cannot be parsed; the raw
+// string is never returned as a host, since it may contain credentials.
+func dbHosts(raw string) (hosts []string, ok bool) {
 	raw = strings.TrimSpace(raw)
 	if strings.HasPrefix(raw, "postgres://") || strings.HasPrefix(raw, "postgresql://") {
 		u, err := url.Parse(raw)
 		if err != nil {
-			return []string{raw}
+			return nil, false
 		}
-		hosts := []string{u.Host}
+		hosts = []string{u.Host}
 		if h := u.Query().Get("host"); h != "" {
 			hosts = append(hosts, h)
 		}
-		return hosts
+		return hosts, true
 	}
-	var hosts []string
 	for _, f := range strings.Fields(raw) {
 		if v, ok := strings.CutPrefix(f, "host="); ok {
 			hosts = append(hosts, strings.Trim(v, "'"))
 		}
 	}
-	return hosts
+	return hosts, true
 }

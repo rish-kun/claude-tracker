@@ -42,3 +42,27 @@ func TestMigrateURLRejectsPooler(t *testing.T) {
 		t.Fatalf("err = %v", err)
 	}
 }
+
+// A malformed URL is refused without echoing it, its password or its host.
+func TestCheckMigrateURLNeverEchoesAMalformedURL(t *testing.T) {
+	for _, raw := range []string{
+		"postgres://neondb_owner:s3cr3t-PW@ep-x-pooler.us-east-2.aws.neon.tech:notaport/neondb", // invalid port
+		"postgresql://neondb_owner:s3cr3t%zz@ep-x-pooler.us-east-2.aws.neon.tech/neondb",        // invalid escape
+		"postgres://neondb_owner:s3cr3t-PW@ep-x-pooler.neon.tech/db\x7f",                        // control character
+	} {
+		if hosts, ok := dbHosts(raw); ok || len(hosts) != 0 {
+			t.Errorf("dbHosts(%q) = %q, %v; want no host", raw, hosts, ok)
+		}
+		for _, err := range []error{CheckMigrateURL(raw), MigrateURL(context.Background(), raw)} {
+			if err == nil {
+				t.Fatalf("%q: no error", raw)
+			}
+			msg := err.Error()
+			for _, leak := range []string{"s3cr3t", "neondb_owner", "ep-x-pooler", "://"} {
+				if strings.Contains(msg, leak) {
+					t.Errorf("error leaks %q: %s", leak, msg)
+				}
+			}
+		}
+	}
+}

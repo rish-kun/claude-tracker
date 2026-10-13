@@ -304,9 +304,10 @@ impl Uploader<'_> {
     }
 
     /// Uploads one batch. Sessions the server refuses on their own are
-    /// quarantined, unless every refused session failed with the same status
-    /// and nothing at all was accepted: that looks like a rejection of this
-    /// device or client (clock skew, schema drift), so the sync stops instead.
+    /// quarantined, unless every refused session failed with the same non-403
+    /// status (400/409/422) and nothing at all was accepted: that looks like a
+    /// rejection of this device or client (clock skew, schema drift), so the
+    /// sync stops instead. A 403 is always quarantined.
     fn send_batch(&mut self, entries: Vec<UsageEntry>, snap: Option<&UsageSnapshot>) -> Result<()> {
         // Sessions quarantined earlier in this run are not sent again.
         let entries: Vec<UsageEntry> = entries.into_iter().filter(|e| !self.quarantine.contains(&self.scope, &e.session_id)).collect();
@@ -344,7 +345,13 @@ impl Uploader<'_> {
                 log(self.paths, &format!("dropped limit snapshot captured at {}: HTTP {} ({})", s.fetched_at.to_rfc3339(), r.status, r.error));
             }
         }
+        // A 403 that persists for a session sent alone is definitive (the
+        // session belongs to another user; a bearer-token client gets no other
+        // 403 from ingest), so it is always quarantined, even when it is the
+        // only session: otherwise a lone foreign session would be retried
+        // forever and block every later batch of a sweep.
         if let Some((_, _, first)) = failed.first()
+            && first.status != 403
             && !accepted_any
             && failed.iter().all(|(_, _, r)| r.status == first.status)
         {

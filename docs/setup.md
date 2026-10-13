@@ -46,8 +46,9 @@ Create a Neon project (or connect Neon through the Vercel marketplace). You need
    Removing someone from `ALLOWED_DOMAINS` / `ALLOWED_EMAILS` only stops new sign-ins; it
    does not end sessions they already have. Revoke their CLI tokens on the dashboard's
    **Settings** page: the server rejects the token at once, and their Claude Code is
-   blocked once the CLI next contacts the server (at every session start and after each
-   turn). Their browser session cookie expires within 30 days.
+   blocked from the next session start (checked online with a 2-second limit) or the
+   next sync (after each turn), whichever comes first. Their browser session cookie
+   expires within 30 days.
 4. Deploy, then open `PUBLIC_URL` and sign in.
 
 ## 4. Install the CLI (each developer)

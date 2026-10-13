@@ -49,8 +49,14 @@ pub struct ApiClient {
 
 impl ApiClient {
     pub fn new(server: &str, token: Option<&str>) -> Self {
+        Self::with_timeout(server, token, Duration::from_secs(30))
+    }
+
+    /// A client whose every request (connect, send and read) must finish
+    /// within `timeout`.
+    pub fn with_timeout(server: &str, token: Option<&str>, timeout: Duration) -> Self {
         let http = Client::builder()
-            .timeout(Duration::from_secs(30))
+            .timeout(timeout)
             .user_agent(concat!("cctrack/", env!("CARGO_PKG_VERSION")))
             .build()
             .expect("build HTTP client");

@@ -689,15 +689,56 @@ fn identical_rejection_of_every_session_stops_without_quarantine() {
 }
 
 #[test]
-fn single_session_rejection_is_not_quarantined() {
+fn single_session_400_rejection_stops_without_quarantine() {
     let fx = fixture();
     fs::remove_file(&fx.paths.claude_json).unwrap(); // no snapshot
     let mut server = mockito::Server::new();
-    let mock = server.mock("POST", "/api/ingest").with_status(403).with_body(r#"{"error":"a session in this batch belongs to another user"}"#).expect(2).create();
+    let mock = server.mock("POST", "/api/ingest").with_status(400).with_body(r#"{"error":"ts too far in the future"}"#).expect(2).create();
     let client = ApiClient::new(&server.url(), Some("cct_test"));
     let err = sync::run(&fx.paths, &fx.creds, &client, &opts(), now()).unwrap_err().to_string();
-    assert!(err.contains("HTTP 403"), "{err}");
+    assert!(err.contains("HTTP 400") && err.contains("nothing was quarantined"), "{err}");
     assert!(!fx.paths.quarantine().exists());
+    assert_eq!(Offsets::load(&fx.paths.offsets()).get(&fx.transcript).offset, 0);
+    mock.assert();
+}
+
+#[test]
+fn lone_foreign_session_403_is_quarantined_and_later_batches_upload() {
+    let fx = fixture();
+    fs::remove_file(&fx.paths.claude_json).unwrap(); // no snapshot: batch 1 is "bad" alone
+    // Exactly BATCH_ENTRIES entries of "bad" fill batch 1 on their own; the
+    // rest ("good", then sess-1) land in batch 2.
+    let bad = fx.paths.projects_dir().join("-home-dev-a/bad.jsonl");
+    fs::create_dir_all(bad.parent().unwrap()).unwrap();
+    fs::write(&bad, (0..sync::BATCH_ENTRIES).map(|i| line("bad", &format!("bad_{i}"), "2026-10-01T10:00:00Z")).collect::<Vec<_>>().join("\n") + "\n").unwrap();
+    let good = fx.paths.projects_dir().join("-home-dev-b/good.jsonl");
+    fs::create_dir_all(good.parent().unwrap()).unwrap();
+    fs::write(&good, line("good", "good_1", "2026-10-01T10:00:00Z") + "\n").unwrap();
+
+    // batch 1 (403) → bad alone (403: quarantined, not a stop) → batch 2 (200).
+    let (server, mock, bodies) = refusing_server(3);
+    let client = ApiClient::new(&server.url(), Some("cct_test"));
+    let report = sync::run(&fx.paths, &fx.creds, &client, &opts(), now()).unwrap();
+    assert_eq!(report.quarantined, vec!["bad".to_string()]);
+    assert_eq!(report.accepted, 3, "good_1 + msg_1 + msg_3");
+    {
+        let bodies = bodies.lock().unwrap();
+        assert_eq!(bodies[0]["sessions"].as_array().unwrap().len(), 1, "batch 1 holds only the foreign session");
+        let last = bodies.last().unwrap();
+        let ids: Vec<&str> = last["entries"].as_array().unwrap().iter().map(|e| e["message_id"].as_str().unwrap()).collect();
+        assert_eq!(ids.len(), 3, "{ids:?}");
+        assert!(ids.contains(&"good_1") && ids.contains(&"msg_1") && ids.contains(&"msg_3"), "{ids:?}");
+    }
+    assert!(sync::Quarantine::load(&fx.paths.quarantine()).contains(&sync::Quarantine::scope(&fx.creds), "bad"));
+    let offsets = Offsets::load(&fx.paths.offsets());
+    assert_eq!(offsets.get(&bad).offset, fs::metadata(&bad).unwrap().len());
+    assert_eq!(offsets.get(&good).offset, fs::metadata(&good).unwrap().len());
+
+    // A second sync sends nothing for it, even for new entries.
+    fs::write(&bad, fs::read_to_string(&bad).unwrap() + &line("bad", "bad_new", "2026-10-01T11:00:00Z") + "\n").unwrap();
+    let report = sync::run(&fx.paths, &fx.creds, &client, &opts(), now()).unwrap();
+    assert_eq!(report.entries_sent, 0);
+    assert_eq!(report.batches, 0);
     mock.assert();
 }
 
