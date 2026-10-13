@@ -3,11 +3,13 @@ package httpapi
 import (
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"net/url"
 	"regexp"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"cctrack/server/internal/api"
 	"cctrack/server/internal/auth"
@@ -50,7 +52,7 @@ func (s *Server) CliStart(w http.ResponseWriter, r *http.Request, params api.Cli
 		writeError(w, http.StatusBadRequest, "code_challenge must be 43-128 base64url characters")
 		return
 	}
-	_ = s.store.PurgeExpired(r.Context())
+	s.purgeExpired(r)
 	state := auth.RandomString(32)
 	err := s.store.CreateAuthRequest(r.Context(), store.AuthRequest{
 		State: state, Mode: mode, CLIState: params.State, CLIPort: port,
@@ -63,7 +65,34 @@ func (s *Server) CliStart(w http.ResponseWriter, r *http.Request, params api.Cli
 	http.Redirect(w, r, s.idp.AuthCodeURL(state, s.redirectURL()), http.StatusFound)
 }
 
+// purgeExpired is best-effort cleanup of stale auth rows; failures are logged
+// and never block a login.
+func (s *Server) purgeExpired(r *http.Request) {
+	if err := s.store.PurgeExpired(r.Context()); err != nil {
+		log.Printf("purge expired auth rows: %v", err)
+	}
+}
+
+const maxDeviceNameRunes = 100
+
+// truncateDeviceName sanitises a client-supplied device name so Postgres text
+// accepts it: invalid UTF-8 is replaced, NUL bytes are dropped, and the result
+// is cut to at most maxDeviceNameRunes runes (never mid-character).
+func truncateDeviceName(name string) string {
+	name = strings.ToValidUTF8(name, "\uFFFD")
+	name = strings.ReplaceAll(name, "\x00", "")
+	name = strings.TrimSpace(name)
+	if utf8.RuneCountInString(name) > maxDeviceNameRunes {
+		name = strings.TrimSpace(string([]rune(name)[:maxDeviceNameRunes]))
+	}
+	if name == "" {
+		return "unknown"
+	}
+	return name
+}
+
 func (s *Server) WebStart(w http.ResponseWriter, r *http.Request) {
+	s.purgeExpired(r)
 	state := auth.RandomString(32)
 	err := s.store.CreateAuthRequest(r.Context(), store.AuthRequest{
 		State: state, Mode: "web", ExpiresAt: s.now().Add(authRequestTTL),
@@ -153,13 +182,7 @@ func (s *Server) CliExchange(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &body) {
 		return
 	}
-	device := strings.TrimSpace(body.DeviceName)
-	if device == "" {
-		device = "unknown"
-	}
-	if len(device) > 100 {
-		device = device[:100]
-	}
+	device := truncateDeviceName(body.DeviceName)
 	userID, challenge, err := s.store.ConsumeCLICode(r.Context(), auth.HashToken(body.Code))
 	if errors.Is(err, store.ErrNotFound) {
 		writeError(w, http.StatusBadRequest, "invalid or expired code")

@@ -57,9 +57,17 @@ func (s *Server) authenticate(next http.Handler) http.Handler {
 			}
 			r = r.WithContext(context.WithValue(r.Context(), ctxKey{}, principal{User: u, TokenID: tokenID}))
 		} else if c, err := r.Cookie(sessionCookie); err == nil {
+			// An invalid/expired cookie or a deleted user means anonymous;
+			// any other store error is a real failure, not a logged-out user.
 			if uid, err := s.sessions.Decode(c.Value, s.now()); err == nil {
-				if u, err := s.store.UserByID(r.Context(), uid); err == nil {
+				u, err := s.store.UserByID(r.Context(), uid)
+				switch {
+				case err == nil:
 					r = r.WithContext(context.WithValue(r.Context(), ctxKey{}, principal{User: u}))
+				case errors.Is(err, store.ErrNotFound):
+				default:
+					s.internal(w, err)
+					return
 				}
 			}
 		}
