@@ -37,6 +37,9 @@ func validateIngest(req *api.IngestRequest, now time.Time) error {
 		if s.SessionId == "" || len(s.SessionId) > 100 {
 			return fmt.Errorf("sessions[%d].session_id is required (max 100 chars)", i)
 		}
+		if !inRange(s.StartedAt, latest) || !inRange(s.EndedAt, latest) {
+			return fmt.Errorf("sessions[%d]: started_at/ended_at out of range", i)
+		}
 		if s.EndedAt.Before(s.StartedAt) {
 			return fmt.Errorf("sessions[%d]: ended_at before started_at", i)
 		}
@@ -54,7 +57,7 @@ func validateIngest(req *api.IngestRequest, now time.Time) error {
 			return fmt.Errorf("entries[%d].model is required (max 200 chars)", i)
 		case e.Input < 0 || e.Output < 0 || e.CacheWrite5m < 0 || e.CacheWrite1h < 0 || e.CacheRead < 0:
 			return fmt.Errorf("entries[%d]: token counts must be >= 0", i)
-		case e.Ts.Before(earliestTS) || e.Ts.After(latest):
+		case !inRange(e.Ts, latest):
 			return fmt.Errorf("entries[%d].ts out of range", i)
 		}
 	}
@@ -67,9 +70,16 @@ func validateIngest(req *api.IngestRequest, now time.Time) error {
 				return fmt.Errorf("limit_snapshot percentages must be within 0-1000")
 			}
 		}
-		if s.CapturedAt.After(latest) {
+		if !inRange(s.CapturedAt, latest) {
 			return fmt.Errorf("limit_snapshot.captured_at out of range")
 		}
 	}
 	return nil
+}
+
+// inRange reports whether t lies within [earliestTS, latest]. Zero (omitted)
+// times fail, which matters for sessions: the upsert keeps LEAST(started_at)
+// and GREATEST(ended_at), so a bad bound could never be corrected later.
+func inRange(t, latest time.Time) bool {
+	return !t.Before(earliestTS) && !t.After(latest)
 }

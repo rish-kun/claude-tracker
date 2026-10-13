@@ -1,9 +1,11 @@
 package store
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -60,13 +62,21 @@ func (s *Store) Ingest(ctx context.Context, userID int64, req *api.IngestRequest
 			  org_uuid = COALESCE(EXCLUDED.org_uuid, claude_accounts.org_uuid),
 			  email = COALESCE(EXCLUDED.email, claude_accounts.email),
 			  org_type = COALESCE(EXCLUDED.org_type, claude_accounts.org_type),
-			  rate_limit_tier = COALESCE(EXCLUDED.rate_limit_tier, claude_accounts.rate_limit_tier)
+			  rate_limit_tier = COALESCE(EXCLUDED.rate_limit_tier, claude_accounts.rate_limit_tier),
+			  -- Fill in a plan first seen without a tier; never touch one an admin (or an
+			  -- earlier guess) already set.
+			  plan = CASE WHEN claude_accounts.plan = 'unknown' THEN EXCLUDED.plan ELSE claude_accounts.plan END
 			RETURNING id`,
 			uuid, ptrOrNil(a.OrgUuid), ptrOrNil(a.Email), ptrOrNil(a.OrgType), ptrOrNil(a.RateLimitTier), label, plan).Scan(&id)
 		accountIDs[a.AccountUuid] = id
 		return err
 	}
-	for _, a := range req.Accounts {
+	// Rows are locked in a fixed order (accounts by uuid, sessions by id, entries
+	// by message id) so concurrent batches touching the same rows cannot deadlock.
+	accounts := slices.SortedFunc(slices.Values(req.Accounts), func(a, b api.IngestAccount) int {
+		return cmp.Compare(a.AccountUuid, b.AccountUuid)
+	})
+	for _, a := range accounts {
 		if a.AccountUuid == APIKeyAccount {
 			continue
 		}
@@ -99,7 +109,10 @@ func (s *Store) Ingest(ctx context.Context, userID int64, req *api.IngestRequest
 			sessionAccount[e.SessionId] = accountIDs[e.AccountUuid]
 		}
 	}
-	for _, sess := range req.Sessions {
+	sessions := slices.SortedFunc(slices.Values(req.Sessions), func(a, b api.IngestSession) int {
+		return cmp.Compare(a.SessionId, b.SessionId)
+	})
+	for _, sess := range sessions {
 		var acct *int64
 		if id, ok := sessionAccount[sess.SessionId]; ok {
 			acct = &id
@@ -137,7 +150,10 @@ func (s *Store) Ingest(ctx context.Context, userID int64, req *api.IngestRequest
 			in, out, w5, w1, cr             []int64
 			sub                             []bool
 		}{}
-		for _, e := range req.Entries {
+		entries := slices.SortedFunc(slices.Values(req.Entries), func(a, b api.IngestEntry) int {
+			return cmp.Compare(a.MessageId, b.MessageId)
+		})
+		for _, e := range entries {
 			speed := deref(e.Speed)
 			if speed == "" {
 				speed = "standard"
