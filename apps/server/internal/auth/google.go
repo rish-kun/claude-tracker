@@ -4,26 +4,46 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
+	"time"
 
 	"github.com/coreos/go-oidc/v3/oidc"
 	"golang.org/x/oauth2"
 )
 
-const googleIssuer = "https://accounts.google.com"
+const (
+	googleIssuer   = "https://accounts.google.com"
+	googleCertsURL = "https://www.googleapis.com/oauth2/v3/certs"
+	googleTokenURL = "https://oauth2.googleapis.com/token"
+
+	// googleHTTPTimeout bounds each call to Google (code exchange, key fetch)
+	// so a slow upstream cannot pin a request goroutine indefinitely.
+	googleHTTPTimeout = 10 * time.Second
+)
 
 // Google implements IdentityProvider with Google's OAuth 2.0 web flow.
 type Google struct {
 	clientID     string
 	clientSecret string
+	tokenURL     string
+	client       *http.Client
 	verifier     *oidc.IDTokenVerifier
 }
 
 // NewGoogle does no network I/O; signing keys are fetched lazily on first verify.
 func NewGoogle(ctx context.Context, clientID, clientSecret string) *Google {
-	keys := oidc.NewRemoteKeySet(ctx, "https://www.googleapis.com/oauth2/v3/certs")
+	return newGoogle(ctx, clientID, clientSecret, &http.Client{Timeout: googleHTTPTimeout}, googleCertsURL, googleTokenURL)
+}
+
+// newGoogle wires client into both the token exchange and the remote key set
+// (which keeps ctx for its lifetime and fetches keys with ctx's client).
+func newGoogle(ctx context.Context, clientID, clientSecret string, client *http.Client, certsURL, tokenURL string) *Google {
+	keys := oidc.NewRemoteKeySet(oidc.ClientContext(ctx, client), certsURL)
 	return &Google{
 		clientID:     clientID,
 		clientSecret: clientSecret,
+		tokenURL:     tokenURL,
+		client:       client,
 		verifier:     oidc.NewVerifier(googleIssuer, keys, &oidc.Config{ClientID: clientID}),
 	}
 }
@@ -36,7 +56,7 @@ func (g *Google) config(redirectURL string) *oauth2.Config {
 		Scopes:       []string{"openid", "email", "profile"},
 		Endpoint: oauth2.Endpoint{
 			AuthURL:   "https://accounts.google.com/o/oauth2/v2/auth",
-			TokenURL:  "https://oauth2.googleapis.com/token",
+			TokenURL:  g.tokenURL,
 			AuthStyle: oauth2.AuthStyleInParams,
 		},
 	}
@@ -47,7 +67,7 @@ func (g *Google) AuthCodeURL(state, redirectURL string) string {
 }
 
 func (g *Google) Exchange(ctx context.Context, code, redirectURL string) (Identity, error) {
-	tok, err := g.config(redirectURL).Exchange(ctx, code)
+	tok, err := g.config(redirectURL).Exchange(context.WithValue(ctx, oauth2.HTTPClient, g.client), code)
 	if err != nil {
 		return Identity{}, fmt.Errorf("exchange code: %w", err)
 	}
