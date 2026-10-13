@@ -17,3 +17,6 @@ type Store struct {
 }
 
 func New(pool *pgxpool.Pool) *Store { return &Store{pool: pool} }
+
+// Pool exposes the pool for tests and diagnostics.
+func (s *Store) Pool() *pgxpool.Pool { return s.pool }

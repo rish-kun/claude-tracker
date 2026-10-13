@@ -10,12 +10,6 @@ func notImplemented(w http.ResponseWriter) {
 	writeError(w, http.StatusNotImplemented, "not implemented")
 }
 
-// Task 6
-func (s *Server) Ingest(w http.ResponseWriter, r *http.Request) { notImplemented(w) }
-func (s *Server) SetSessionSummary(w http.ResponseWriter, r *http.Request, sessionId string) {
-	notImplemented(w)
-}
-
 // Task 7
 func (s *Server) GetMyUsage(w http.ResponseWriter, r *http.Request, params api.GetMyUsageParams) {
 	notImplemented(w)
