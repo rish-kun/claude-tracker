@@ -120,7 +120,8 @@ fn run(cli: Cli) -> Result<ExitCode> {
             let spawn = |args: &[String]| {
                 let _ = cctrack::detach::spawn(args);
             };
-            let out = cctrack::hook::run(&paths, event, &input, chrono::Utc::now(), &spawn)?;
+            let bin = cctrack::hook::TrustedBinary::current();
+            let out = cctrack::hook::run(&paths, event, &input, chrono::Utc::now(), &bin, &spawn)?;
             if !out.is_empty() {
                 println!("{out}");
             }

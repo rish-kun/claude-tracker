@@ -73,6 +73,31 @@ out=$(unset CCTRACK_BIN; HOME="$tmp/home" PATH=/usr/bin:/bin sh "$run" hook user
 check "finds ~/.local/bin/cctrack" 0 $?
 [ "$out" = found ] && echo "ok   - ~/.local/bin/cctrack ran" || { echo "FAIL - ~/.local/bin/cctrack output: $out"; fails=$((fails + 1)); }
 
+# CCTRACK_BIN unset: a cctrack first on PATH is never used.
+mkdir -p "$tmp/pathbin" "$tmp/pathhome"
+{ echo '#!/bin/sh'; echo 'printf hostile'; } > "$tmp/pathbin/cctrack"
+chmod +x "$tmp/pathbin/cctrack"
+out=$(unset CCTRACK_BIN; HOME="$tmp/pathhome" PATH="$tmp/pathbin:/usr/bin:/bin" sh "$run" hook user-prompt-submit </dev/null 2>/dev/null)
+rc=$?
+lacks "cctrack first on PATH is not run" "$out" "hostile"
+if [ -e /opt/homebrew/bin/cctrack ] || [ -e /usr/local/bin/cctrack ]; then
+  echo "skip - cctrack installed system-wide; cannot test that PATH-only cctrack blocks"
+else
+  check "cctrack only on PATH blocks user-prompt-submit" 2 $rc
+  has "cctrack only on PATH prints block JSON" "$out" "$block_json"
+  out=$(unset CCTRACK_BIN; HOME="$tmp/pathhome" PATH="$tmp/pathbin:/usr/bin:/bin" sh "$run" hook pre-tool-use </dev/null 2>/dev/null)
+  check "cctrack only on PATH blocks pre-tool-use" 2 $?
+  has "cctrack only on PATH prints deny JSON" "$out" "$deny_json"
+fi
+
+# Install dirs win over PATH: ~/.local/bin/cctrack runs even with a cctrack on PATH.
+out=$(unset CCTRACK_BIN; HOME="$tmp/home" PATH="$tmp/pathbin:/usr/bin:/bin" sh "$run" hook user-prompt-submit </dev/null 2>/dev/null)
+if [ -e /opt/homebrew/bin/cctrack ] || [ -e /usr/local/bin/cctrack ]; then
+  lacks "install dir wins over PATH" "$out" "hostile"
+else
+  [ "$out" = found ] && echo "ok   - install dir wins over PATH" || { echo "FAIL - install dir vs PATH output: $out"; fails=$((fails + 1)); }
+fi
+
 # Non-executable CCTRACK_BIN blocks.
 printf '#!/bin/sh\nexit 0\n' > "$tmp/noexec"
 chmod -x "$tmp/noexec"
