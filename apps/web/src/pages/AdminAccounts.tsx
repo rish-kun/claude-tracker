@@ -6,7 +6,7 @@ import { LimitGauges } from '../components/limits'
 import { Cost, UnpricedNote } from '../components/tables'
 import { accountName } from '../lib/accounts'
 import { formatPct, formatTokens, formatUSD, PLAN_LABELS } from '../lib/format'
-import { pivot } from '../lib/pivot'
+import { markUnpriced, pivot } from '../lib/pivot'
 import { datesBetween, type Range } from '../lib/range'
 import { useRange } from '../lib/rangeContext'
 
@@ -54,7 +54,7 @@ function AccountCard({ d, range }: { d: AccountDetail; range: Range }) {
         </div>
         <div>
           <h2>Daily cost per user</h2>
-          <StackedDaily pivot={pivot(d.daily_by_user, datesBetween(range), 'cost_usd')} format={formatUSD} kind="bar" />
+          <StackedDaily pivot={markUnpriced(pivot(d.daily_by_user, datesBetween(range), 'cost_usd'))} format={formatUSD} kind="bar" />
           <UnpricedNote tokens={d.totals.unpriced_tokens} />
           <h2>Plan-limit utilisation</h2>
           <LimitTimeline limits={d.limits} />

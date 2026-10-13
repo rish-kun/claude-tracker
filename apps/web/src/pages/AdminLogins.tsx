@@ -6,7 +6,7 @@ import { Cost, SessionsTable, UnpricedNote } from '../components/tables'
 import type { Totals } from '../api/client'
 import { accountColumns, groupSpan, hasSubtotal, planGroups, planSubtotal } from '../lib/accounts'
 import { formatTokens, formatUSD, PLAN_LABELS } from '../lib/format'
-import { pivot } from '../lib/pivot'
+import { markUnpriced, pivot } from '../lib/pivot'
 import { datesBetween } from '../lib/range'
 import { useRange } from '../lib/rangeContext'
 
@@ -39,9 +39,13 @@ function Content() {
 
   const groups = planGroups(columns)
   const unpriced = data.users.reduce((n, u) => n + u.totals.unpriced_tokens, 0)
+  const barUnpriced: Record<string, Record<string, number>> = {}
   const barRows = data.users.map((u) => {
     const row: Record<string, string | number> = { name: u.user.email }
-    for (const a of u.by_account) row[String(a.account.id)] = a.totals.cost_usd
+    for (const a of u.by_account) {
+      row[String(a.account.id)] = a.totals.cost_usd
+      if (a.totals.unpriced_tokens > 0) (barUnpriced[u.user.email] ??= {})[String(a.account.id)] = a.totals.unpriced_tokens
+    }
     return row
   })
   const barKeys = columns.map((c) => ({ key: String(c.id), label: `${c.label} (${PLAN_LABELS[c.plan]})` }))
@@ -50,7 +54,7 @@ function Content() {
     <>
       <section className="card">
         <h2>Estimated cost per login, split by account</h2>
-        <UserAccountBars rows={barRows} keys={barKeys} format={formatUSD} />
+        <UserAccountBars rows={barRows} keys={barKeys} format={formatUSD} unpriced={barUnpriced} />
         <UnpricedNote tokens={unpriced} />
       </section>
       <section className="card">
@@ -126,7 +130,7 @@ function Content() {
       </section>
       <section className="card">
         <h2>Daily estimated cost per login</h2>
-        <StackedDaily pivot={pivot(data.daily_by_user, datesBetween(range), 'cost_usd')} format={formatUSD} />
+        <StackedDaily pivot={markUnpriced(pivot(data.daily_by_user, datesBetween(range), 'cost_usd'))} format={formatUSD} />
         <UnpricedNote tokens={unpriced} />
       </section>
     </>

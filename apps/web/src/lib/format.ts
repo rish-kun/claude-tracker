@@ -26,6 +26,17 @@ export function costLabel(t: { cost_usd: number; unpriced_tokens: number }): str
   return formatUSD(t.cost_usd)
 }
 
+/**
+ * Cost text for one chart cell (a series on a date). Never shows unpriced usage as $0:
+ * "$x.xx" when fully priced, "$x.xx + N unpriced tokens" when partly priced, and
+ * "unpriced (N tokens)" when the cell's cost is 0 but it has unpriced tokens.
+ */
+export function cellCost(cost: number, unpricedTokens: number, format: (n: number) => string = formatUSD): string {
+  if (unpricedTokens <= 0) return format(cost)
+  if (cost === 0) return `unpriced (${formatTokens(unpricedTokens)} tokens)`
+  return `${format(cost)} + ${formatTokens(unpricedTokens)} unpriced tokens`
+}
+
 export function unpricedTitle(unpricedTokens: number): string {
   return `Includes ${formatTokens(unpricedTokens)} unpriced tokens (models with no price in the price table; not in the cost)`
 }
