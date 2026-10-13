@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { api, type ModelPrice, unwrap, type Plan, type PriceRates } from './client'
+import { type Account, api, type ModelPrice, unwrap, type Plan, type PriceRates } from './client'
 import { type Range, rangeAdvanced, rangeKey, rangeQuery } from '../lib/range'
 
 export const PAGE_SIZE = 20
@@ -98,7 +98,12 @@ export function useUpdateAccount() {
   return useMutation({
     mutationFn: (v: { id: number; label: string; plan: Plan }) =>
       unwrap(api.PATCH('/admin/accounts/{id}', { params: { path: { id: v.id } }, body: { label: v.label, plan: v.plan } })),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['admin'] }),
+    onSuccess: (saved) => {
+      // Show the saved account at once so the row's draft doesn't fall back to the pre-save
+      // label/plan while the refetch is in flight.
+      qc.setQueryData<Account[]>(['admin', 'accounts'], (old) => old?.map((a) => (a.id === saved.id ? saved : a)))
+      void qc.invalidateQueries({ queryKey: ['admin'] })
+    },
   })
 }
 

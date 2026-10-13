@@ -2,6 +2,7 @@ import { useState } from 'react'
 import type { Account, ModelPrice, Plan } from '../api/client'
 import { useAccounts, usePrices, usePutPrice, useRevokeToken, useTokens, useUpdateAccount, useUsers } from '../api/hooks'
 import { AdminOnly } from '../components/AdminOnly'
+import { accountConflict, accountDirty, accountDraft, type AccountDraft, type AccountFields, syncAccountDraft } from '../lib/accounts'
 import { formatDateTime, PLAN_LABELS, PLANS } from '../lib/format'
 import {
   addPriceError,
@@ -19,15 +20,20 @@ import {
 
 function AccountRow({ a }: { a: Account }) {
   const update = useUpdateAccount()
-  const [label, setLabel] = useState(a.label)
-  const [plan, setPlan] = useState<Plan>(a.plan)
-  const dirty = label !== a.label || plan !== a.plan
+  const [row, setRow] = useState<AccountDraft>(() => accountDraft(a))
+  // Follow refetched server label/plan while the draft is untouched (adjusting state during render).
+  const synced = syncAccountDraft(row, a)
+  if (synced !== row) setRow(synced)
+  const dirty = accountDirty(synced)
+  const conflict = accountConflict(synced, a)
+  const edit = (d: Partial<AccountFields>) => setRow({ ...synced, draft: { ...synced.draft, ...d } })
+  const save = () => update.mutate({ id: a.id, ...synced.draft }, { onSuccess: (saved) => setRow(accountDraft(saved)) })
   return (
     <tr>
       <td>
         <input
-          value={label}
-          onChange={(e) => setLabel(e.target.value)}
+          value={synced.draft.label}
+          onChange={(e) => edit({ label: e.target.value })}
           maxLength={100}
           placeholder={a.email ?? a.account_uuid}
           aria-label="Label"
@@ -35,7 +41,7 @@ function AccountRow({ a }: { a: Account }) {
         <div className="muted">{a.email ?? a.account_uuid}</div>
       </td>
       <td>
-        <select value={plan} onChange={(e) => setPlan(e.target.value as Plan)}>
+        <select value={synced.draft.plan} onChange={(e) => edit({ plan: e.target.value as Plan })} aria-label="Plan">
           {PLANS.map((p) => (
             <option key={p} value={p}>{PLAN_LABELS[p]}</option>
           ))}
@@ -43,12 +49,25 @@ function AccountRow({ a }: { a: Account }) {
         <div className="muted">{[a.org_type, a.rate_limit_tier].filter(Boolean).join(' / ')}</div>
       </td>
       <td>
-        <button disabled={!dirty || update.isPending} onClick={() => update.mutate({ id: a.id, label, plan })}>
+        <button disabled={!dirty || conflict || update.isPending} onClick={save}>
           {update.isPending ? 'Saving…' : 'Save'}
         </button>
+        {conflict && <ReloadRow onReload={() => setRow(accountDraft(a))} />}
         {update.error && <div className="error">{update.error.message}</div>}
       </td>
     </tr>
+  )
+}
+
+/** Shown when the server value changed under a dirty draft; Save stays disabled until reloaded. */
+function ReloadRow({ onReload }: { onReload: () => void }) {
+  return (
+    <div className="error">
+      Server value changed —{' '}
+      <button className="link" onClick={onReload}>
+        reload row
+      </button>
+    </div>
   )
 }
 
@@ -193,14 +212,7 @@ function PriceRow({ p }: { p: ModelPrice }) {
         <button disabled={!dirty || conflict || invalid !== undefined || put.isPending} onClick={save}>
           {put.isPending ? 'Saving…' : 'Save'}
         </button>
-        {conflict && (
-          <div className="error">
-            Server value changed —{' '}
-            <button className="link" onClick={() => setRow(rowDraft(p.rates))}>
-              reload row
-            </button>
-          </div>
-        )}
+        {conflict && <ReloadRow onReload={() => setRow(rowDraft(p.rates))} />}
         {dirty && invalid && <div className="error">{invalid}</div>}
         {put.error && <div className="error">{put.error.message}</div>}
       </td>

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { AccountRef, ByLogin, Totals } from '../api/client'
-import { accountColumns, accountName, groupSpan, planGroups, planSubtotal, sumTotals } from './accounts'
+import { accountColumns, accountConflict, accountDirty, accountDraft, accountName, groupSpan, planGroups, planSubtotal, sumTotals, syncAccountDraft } from './accounts'
 
 const zero: Totals = {
   input: 0,
@@ -89,5 +89,51 @@ describe('accountName', () => {
     expect(accountName({ label: 'Team Max', email: 'a@x.com', account_uuid: 'u1' })).toBe('Team Max')
     expect(accountName({ label: '', email: 'a@x.com', account_uuid: 'u1' })).toBe('a@x.com')
     expect(accountName({ label: '', account_uuid: 'u1' })).toBe('u1')
+  })
+})
+
+describe('account row drafts', () => {
+  const server = { label: 'Work', plan: 'max_5x' as const }
+  const newer = { label: 'Work (shared)', plan: 'max_20x' as const }
+
+  it('leaves a row alone while the server label/plan are unchanged', () => {
+    const s = accountDraft(server)
+    expect(syncAccountDraft(s, { ...server })).toBe(s)
+    const edited = { ...s, draft: { ...s.draft, label: 'Mine' } }
+    expect(accountDirty(edited)).toBe(true)
+    const fullAccount = { ...server, id: 1, email: 'x@y' } // other Account fields don't matter
+    expect(syncAccountDraft(edited, fullAccount)).toBe(edited)
+    expect(accountConflict(edited, server)).toBe(false)
+  })
+
+  it('resets a pristine draft when the server label or plan changes', () => {
+    const s = syncAccountDraft(accountDraft(server), newer)
+    expect(s.draft).toEqual(newer)
+    expect(accountDirty(s)).toBe(false)
+    expect(accountConflict(s, newer)).toBe(false)
+  })
+
+  it('keeps a dirty draft and flags the conflict until the row is reloaded', () => {
+    const edited = { ...accountDraft(server), draft: { label: 'Mine', plan: 'max_5x' as const } }
+    const s = syncAccountDraft(edited, newer)
+    expect(s).toBe(edited)
+    expect(s.draft.label).toBe('Mine')
+    expect(accountConflict(s, newer)).toBe(true)
+    const reloaded = accountDraft(newer)
+    expect(accountConflict(reloaded, newer)).toBe(false)
+    expect(accountDirty(reloaded)).toBe(false)
+  })
+
+  it('treats a plan-only server change under a label edit as a conflict too', () => {
+    const edited = { ...accountDraft(server), draft: { ...server, label: 'Mine' } }
+    expect(accountConflict(syncAccountDraft(edited, { ...server, plan: 'team' }), { ...server, plan: 'team' })).toBe(true)
+  })
+
+  it('adopts a server change the dirty draft already matches (e.g. its own save)', () => {
+    const edited = { ...accountDraft(server), draft: { ...newer } }
+    const s = syncAccountDraft(edited, newer)
+    expect(s.base).toEqual(newer)
+    expect(accountConflict(s, newer)).toBe(false)
+    expect(accountDirty(s)).toBe(false)
   })
 })

@@ -1,4 +1,5 @@
 import type { Account, AccountRef, ByLogin, Plan, Schemas, Totals } from '../api/client'
+import { type Draft, draftConflict, draftDirty, type DraftOps, startDraft, syncDraft } from './drafts'
 import { PLANS } from './format'
 
 type AccountUsage = Schemas['AccountUsage']
@@ -69,4 +70,37 @@ export function sumTotals(ts: Totals[]): Totals {
 export function planSubtotal(byAccount: AccountUsage[], plan: Plan): Totals | undefined {
   const rows = byAccount.filter((a) => a.account.plan === plan)
   return rows.length === 0 ? undefined : sumTotals(rows.map((a) => a.totals))
+}
+
+/** The editable fields of an account row. */
+export interface AccountFields {
+  label: string
+  plan: Plan
+}
+
+/** An editable account row: the typed label/plan and the server values it was started from. */
+export type AccountDraft = Draft<AccountFields, AccountFields>
+
+const accountOps: DraftOps<AccountFields, AccountFields> = {
+  fromServer: (a) => ({ label: a.label, plan: a.plan }),
+  sameServer: (a, b) => a.label === b.label && a.plan === b.plan,
+  matches: (d, a) => d.label === a.label && d.plan === a.plan,
+}
+
+export function accountDraft(a: AccountFields): AccountDraft {
+  return startDraft(accountOps, { label: a.label, plan: a.plan })
+}
+
+export function accountDirty(s: AccountDraft): boolean {
+  return draftDirty(accountOps, s)
+}
+
+/** Follows new server label/plan while pristine; keeps a dirty draft (see `syncDraft`). */
+export function syncAccountDraft(s: AccountDraft, server: AccountFields): AccountDraft {
+  return syncDraft(accountOps, s, server)
+}
+
+/** The server label/plan changed underneath an edited draft. */
+export function accountConflict(s: AccountDraft, server: AccountFields): boolean {
+  return draftConflict(accountOps, s, server)
 }
