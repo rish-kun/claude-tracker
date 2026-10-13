@@ -18,10 +18,12 @@ func accountRef(a store.Account) api.AccountRef {
 	return api.AccountRef{Id: a.ID, Label: a.DisplayLabel(), Plan: api.Plan(a.Plan), Email: a.Email}
 }
 
+// accountToAPI returns the stored admin label as-is (possibly ""), so the
+// settings page edits the label rather than its email/uuid fallback.
 func accountToAPI(a store.Account) api.Account {
 	return api.Account{
 		Id: a.ID, AccountUuid: a.AccountUUID, OrgUuid: a.OrgUUID, Email: a.Email, OrgType: a.OrgType,
-		RateLimitTier: a.RateLimitTier, Label: a.DisplayLabel(), Plan: api.Plan(a.Plan), CreatedAt: a.CreatedAt,
+		RateLimitTier: a.RateLimitTier, Label: a.Label, Plan: api.Plan(a.Plan), CreatedAt: a.CreatedAt,
 	}
 }
 

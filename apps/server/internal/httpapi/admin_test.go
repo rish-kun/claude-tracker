@@ -5,6 +5,7 @@ import (
 	"math"
 	"net/http"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
 
@@ -64,6 +65,14 @@ func TestAdminEndpointsRequireAdmin(t *testing.T) {
 		}
 		if rec := h.do(rt.method, rt.path, rt.body, bearer(tok)); rec.Code != http.StatusForbidden {
 			t.Errorf("bearer %s %s: got %d, want 403", rt.method, rt.path, rec.Code)
+		}
+	}
+	// An admin's CLI token is not an admin credential either.
+	adminTok := h.loginCLI("admin@example.com")
+	for _, path := range []string{"/api/admin/accounts", "/api/admin/tokens", rangeQ("/api/admin/by-login")} {
+		rec := h.do("GET", path, nil, bearer(adminTok))
+		if rec.Code != http.StatusForbidden || !strings.Contains(rec.Body.String(), "browser session") {
+			t.Errorf("admin bearer GET %s: got %d %s, want 403 browser session", path, rec.Code, rec.Body)
 		}
 	}
 	// Nothing a non-admin sent may have taken effect.
@@ -162,6 +171,12 @@ func TestAdminUpdateAccount(t *testing.T) {
 	}
 	if a := decode[api.Account](t, rec); a.Label != "Renamed" || a.Plan != "max_20x" {
 		t.Fatalf("account = %+v", a)
+	}
+	// The raw label is returned: "" when unset, never the email/uuid fallback.
+	other := fmt.Sprintf("/api/admin/accounts/%d", accounts[1].Id)
+	rec = h.do("PATCH", other, map[string]string{"plan": "pro"}, withCookie(admin), withCSRF())
+	if a := decode[api.Account](t, rec); rec.Code != 200 || a.Label != "" || a.Plan != "pro" {
+		t.Fatalf("plan-only patch: %d %+v", rec.Code, a)
 	}
 	if rec := h.do("PATCH", path, map[string]string{"plan": "gold"}, withCookie(admin), withCSRF()); rec.Code != http.StatusBadRequest {
 		t.Fatalf("invalid plan: %d", rec.Code)

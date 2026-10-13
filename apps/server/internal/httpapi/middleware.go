@@ -106,6 +106,12 @@ func (s *Server) requireAdmin(w http.ResponseWriter, r *http.Request) (principal
 	if !ok {
 		return p, false
 	}
+	// Admin endpoints are cookie-only (openapi.yaml): a leaked CLI token must
+	// not grant admin access.
+	if p.TokenID != 0 {
+		writeError(w, http.StatusForbidden, "admin endpoints require a browser session")
+		return p, false
+	}
 	if !s.isAdmin(p.User.Email) {
 		writeError(w, http.StatusForbidden, "admin only")
 		return p, false

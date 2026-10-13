@@ -500,7 +500,7 @@ components:
       required: [id, label, plan]
       properties:
         id: { type: integer, format: int64 }
-        label: { type: string }
+        label: { type: string } # display label: admin label, else email, else account_uuid
         plan: { $ref: "#/components/schemas/Plan" }
         email: { type: string }
 
@@ -514,7 +514,7 @@ components:
         email: { type: string }
         org_type: { type: string }
         rate_limit_tier: { type: string }
-        label: { type: string }
+        label: { type: string } # stored admin label as-is; "" when unset
         plan: { $ref: "#/components/schemas/Plan" }
         created_at: { type: string, format: date-time }
 
