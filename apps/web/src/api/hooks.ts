@@ -1,8 +1,25 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { api, unwrap, type Plan, type PriceRates } from './client'
-import { type Range, rangeKey, rangeQuery } from '../lib/range'
+import { type Range, rangeAdvanced, rangeKey, rangeQuery } from '../lib/range'
 
 export const PAGE_SIZE = 20
+
+/** Usage data is polled so uploads from other machines show up without reloading the page. */
+export const USAGE_REFETCH_MS = 60_000
+
+/**
+ * Options for a query over the selected range. The range itself advances every minute
+ * (see AppLayout), so keep showing the previous minute's data while the advanced range
+ * loads instead of flashing "Loading…" — but not after switching preset or day.
+ */
+function rangeQueryOptions(r: Range) {
+  const key = rangeKey(r)
+  return {
+    refetchInterval: USAGE_REFETCH_MS,
+    placeholderData: <T>(prev: T | undefined, prevQuery?: { queryKey: readonly unknown[] }) =>
+      prevQuery && rangeAdvanced(String(prevQuery.queryKey[2]), key) ? prev : undefined,
+  }
+}
 
 export function useMe() {
   return useQuery({ queryKey: ['me'], queryFn: () => unwrap(api.GET('/me')), retry: false })
@@ -17,6 +34,7 @@ export function useLogout() {
 
 export function useMyUsage(r: Range) {
   return useQuery({
+    ...rangeQueryOptions(r),
     queryKey: ['me', 'usage', rangeKey(r)],
     queryFn: () => unwrap(api.GET('/me/usage', { params: { query: rangeQuery(r) } })),
   })
@@ -27,11 +45,13 @@ export function useMySessions(page: number) {
     queryKey: ['me', 'sessions', page],
     queryFn: () => unwrap(api.GET('/me/sessions', { params: { query: { limit: PAGE_SIZE, offset: page * PAGE_SIZE } } })),
     placeholderData: (prev) => prev,
+    refetchInterval: USAGE_REFETCH_MS,
   })
 }
 
 export function useByLogin(r: Range) {
   return useQuery({
+    ...rangeQueryOptions(r),
     queryKey: ['admin', 'by-login', rangeKey(r)],
     queryFn: () => unwrap(api.GET('/admin/by-login', { params: { query: rangeQuery(r) } })),
   })
@@ -39,6 +59,7 @@ export function useByLogin(r: Range) {
 
 export function useByAccount(r: Range) {
   return useQuery({
+    ...rangeQueryOptions(r),
     queryKey: ['admin', 'by-account', rangeKey(r)],
     queryFn: () => unwrap(api.GET('/admin/by-account', { params: { query: rangeQuery(r) } })),
   })
@@ -52,6 +73,7 @@ export function useUserSessions(userId: number, page: number) {
         params: { path: { id: userId }, query: { limit: PAGE_SIZE, offset: page * PAGE_SIZE } },
       })),
     placeholderData: (prev) => prev,
+    refetchInterval: USAGE_REFETCH_MS,
   })
 }
 
