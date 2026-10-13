@@ -186,3 +186,31 @@ func TestSessionSummary(t *testing.T) {
 		t.Fatalf("summary = %q", summary)
 	}
 }
+
+// A real browser session cookie (with the CSRF header) is refused on the
+// CLI-only write endpoints and nothing is stored.
+func TestIngestAndSummaryRejectSessionCookie(t *testing.T) {
+	h := newHarness(t)
+	tok := h.loginCLI("dev@example.com")
+	h.ingestOK(tok, ingestFixture("s1", "acc-1", entry("s1", "acc-1", "m1", "claude-opus-4-5", t0, 1, 1)))
+	c := h.loginWeb("dev@example.com")
+
+	rec := h.do("POST", "/api/ingest", ingestFixture("s2", "acc-1",
+		entry("s2", "acc-1", "m2", "claude-opus-4-5", t0, 1, 1)), withCookie(c), withCSRF())
+	if rec.Code != http.StatusForbidden || !strings.Contains(rec.Body.String(), "use the cctrack CLI") {
+		t.Fatalf("cookie ingest: %d %s", rec.Code, rec.Body)
+	}
+	rec = h.do("POST", "/api/sessions/s1/summary", map[string]string{"summary": "from browser"}, withCookie(c), withCSRF())
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("cookie summary: %d %s", rec.Code, rec.Body)
+	}
+	var n int
+	h.scan("SELECT count(*) FROM usage_entries", &n)
+	if n != 1 {
+		t.Fatalf("entries = %d, want 1", n)
+	}
+	h.scan("SELECT count(*) FROM sessions WHERE summary IS NOT NULL", &n)
+	if n != 0 {
+		t.Fatalf("summary written via cookie")
+	}
+}

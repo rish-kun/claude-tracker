@@ -101,6 +101,20 @@ func (s *Server) requireUser(w http.ResponseWriter, r *http.Request) (principal,
 	return p, ok
 }
 
+// requireCLI admits only bearer-token principals: ingest and summaries are
+// written by the cctrack CLI, never by a browser session (openapi.yaml).
+func (s *Server) requireCLI(w http.ResponseWriter, r *http.Request) (principal, bool) {
+	p, ok := s.requireUser(w, r)
+	if !ok {
+		return p, false
+	}
+	if p.TokenID == 0 {
+		writeError(w, http.StatusForbidden, "use the cctrack CLI")
+		return p, false
+	}
+	return p, true
+}
+
 func (s *Server) requireAdmin(w http.ResponseWriter, r *http.Request) (principal, bool) {
 	p, ok := s.requireUser(w, r)
 	if !ok {

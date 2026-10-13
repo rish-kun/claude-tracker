@@ -13,7 +13,7 @@ import (
 const maxSummaryRunes = 500
 
 func (s *Server) Ingest(w http.ResponseWriter, r *http.Request) {
-	p, ok := s.requireUser(w, r)
+	p, ok := s.requireCLI(w, r)
 	if !ok {
 		return
 	}
@@ -43,7 +43,7 @@ func (s *Server) Ingest(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) SetSessionSummary(w http.ResponseWriter, r *http.Request, sessionId string) {
-	p, ok := s.requireUser(w, r)
+	p, ok := s.requireCLI(w, r)
 	if !ok {
 		return
 	}

@@ -175,3 +175,27 @@ func TestNULRejectedInSummaryAndLabel(t *testing.T) {
 	s.AdminUpdateAccount(rec, requestAs(adminCookie, "PATCH", "/api/admin/accounts/1", `{"label":"Team\u0000Max"}`), 1)
 	wantError(t, rec, http.StatusBadRequest, "must not contain NUL")
 }
+
+// TestIngestAndSummaryRequireBearer: a browser session (TokenID == 0) must not
+// write usage or summaries, even with the CSRF header.
+func TestIngestAndSummaryRequireBearer(t *testing.T) {
+	s := New(testConfig(), nil, &fakeIDP{})
+	cookieUser := principal{User: store.User{ID: 2, Email: "dev@example.com"}}
+
+	rec := httptest.NewRecorder()
+	s.Ingest(rec, requestAs(cookieUser, "POST", "/api/ingest", marshal(t, ingestJSON(t))))
+	wantError(t, rec, http.StatusForbidden, "use the cctrack CLI")
+
+	rec = httptest.NewRecorder()
+	s.SetSessionSummary(rec, requestAs(cookieUser, "POST", "/api/sessions/s1/summary", `{"summary":"x"}`), "s1")
+	wantError(t, rec, http.StatusForbidden, "use the cctrack CLI")
+
+	rec = httptest.NewRecorder()
+	s.Ingest(rec, httptest.NewRequest("POST", "/api/ingest", strings.NewReader("{}")))
+	wantError(t, rec, http.StatusUnauthorized, "not logged in")
+
+	// requireCLI admits a bearer principal.
+	if _, ok := s.requireCLI(httptest.NewRecorder(), requestAs(cliBearer, "POST", "/api/ingest", "")); !ok {
+		t.Fatal("bearer principal rejected")
+	}
+}
