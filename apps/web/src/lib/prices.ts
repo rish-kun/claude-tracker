@@ -96,3 +96,13 @@ export function syncRowDraft(s: RowDraft, server: PriceRates): RowDraft {
 export function rowConflict(s: RowDraft, server: PriceRates): boolean {
   return !baseRatesEqual(s.base, server)
 }
+
+/**
+ * Error text for the Add-price row. A 409 means the normalised model is already priced
+ * (server message "model already priced: <normalised>"); nothing was written.
+ */
+export function addPriceError(err: { status?: number; message: string }): string {
+  if (err.status !== 409) return err.message
+  const model = /already priced:\s*(.+)$/.exec(err.message)?.[1]?.trim()
+  return `${model ? `${model} is ` : ''}already priced — edit its row instead.`
+}

@@ -111,11 +111,25 @@ export function useRevokeToken() {
   })
 }
 
+export interface PutPriceVars {
+  model: string
+  rates: PriceRates
+  /**
+   * Only add a new price: the server answers 409 (and writes nothing) if the normalised
+   * model is already priced, so the Add row can't overwrite an existing model's fast/long rates.
+   */
+  create?: boolean
+}
+
+/** Path and query params for PUT /admin/prices/{model} (`?create=true` only when creating). */
+export function putPriceParams(v: Pick<PutPriceVars, 'model' | 'create'>) {
+  return { path: { model: v.model }, query: v.create ? { create: true } : undefined }
+}
+
 export function usePutPrice() {
   const qc = useQueryClient()
   return useMutation({
-    mutationFn: (v: { model: string; rates: PriceRates }) =>
-      unwrap(api.PUT('/admin/prices/{model}', { params: { path: { model: v.model } }, body: v.rates })),
+    mutationFn: (v: PutPriceVars) => unwrap(api.PUT('/admin/prices/{model}', { params: putPriceParams(v), body: v.rates })),
     onSuccess: (saved) => {
       // Show the saved rates at once so price rows don't fall back to the pre-save values
       // while the refetch is in flight; the refetch then picks up any new model and costs.

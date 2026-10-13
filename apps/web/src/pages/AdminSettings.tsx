@@ -4,6 +4,7 @@ import { useAccounts, usePrices, usePutPrice, useRevokeToken, useTokens, useUpda
 import { AdminOnly } from '../components/AdminOnly'
 import { formatDateTime, PLAN_LABELS, PLANS } from '../lib/format'
 import {
+  addPriceError,
   BASE_RATE_FIELDS,
   EMPTY_DRAFT,
   modelError,
@@ -219,7 +220,8 @@ function AddPriceRow() {
     if (invalid !== undefined || !('rates' in parsed)) return
     setSaved(undefined)
     put.mutate(
-      { model: model.trim(), rates: parsed.rates },
+      // create=true: never replace an existing model's rates (incl. fast/long) from here.
+      { model: model.trim(), rates: parsed.rates, create: true },
       {
         onSuccess: (p) => {
           setSaved(p.model)
@@ -237,6 +239,7 @@ function AddPriceRow() {
           onChange={(e) => {
             setModel(e.target.value)
             setSaved(undefined)
+            put.reset() // a 409 for the previous id no longer applies
           }}
           placeholder="New model id, e.g. claude-opus-6"
           aria-label="New model id"
@@ -255,7 +258,7 @@ function AddPriceRow() {
           {put.isPending ? 'Saving…' : 'Add'}
         </button>
         {touched && invalid && <div className="error">{invalid}</div>}
-        {put.error && <div className="error">{put.error.message}</div>}
+        {put.error && <div className="error">{addPriceError(put.error)}</div>}
         {saved && <div className="muted">Saved as {saved}</div>}
       </td>
     </tr>
@@ -269,7 +272,7 @@ function Prices() {
       <h2>Model prices (USD per million tokens)</h2>
       <p className="muted">
         Used to estimate API-equivalent cost. Changes apply to all past usage. Add a row for a model that shows as
-        unpriced; the id is normalised (dates and provider prefixes removed), and an existing model's price is replaced.
+        unpriced; the id is normalised (dates and provider prefixes removed). To change an existing model's price, edit its row.
       </p>
       {q.error && <div className="error">{q.error.message}</div>}
       <div className="table-scroll">

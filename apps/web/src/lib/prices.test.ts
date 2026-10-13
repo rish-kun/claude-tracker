@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import type { PriceRates } from '../api/client'
 import {
+  addPriceError,
   baseRatesEqual,
   draftChanged,
   draftFromRates,
@@ -122,5 +123,18 @@ describe('price row drafts', () => {
     const s = rowDraft(saved)
     expect(syncRowDraft(s, { ...saved })).toBe(s)
     expect(rowDirty(s)).toBe(false)
+  })
+})
+
+describe('addPriceError', () => {
+  it('explains a 409 with the normalised model and points to its row', () => {
+    expect(addPriceError({ status: 409, message: 'model already priced: claude-opus-6' })).toBe(
+      'claude-opus-6 is already priced — edit its row instead.',
+    )
+    expect(addPriceError({ status: 409, message: 'Conflict' })).toBe('already priced — edit its row instead.')
+  })
+  it('passes other errors through', () => {
+    expect(addPriceError({ status: 400, message: 'bad rates' })).toBe('bad rates')
+    expect(addPriceError(new Error('network down'))).toBe('network down')
   })
 })
