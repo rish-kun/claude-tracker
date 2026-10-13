@@ -1,8 +1,17 @@
 import { useState } from 'react'
-import type { Account, ModelPrice, Plan, PriceRates } from '../api/client'
+import type { Account, ModelPrice, Plan } from '../api/client'
 import { useAccounts, usePrices, usePutPrice, useRevokeToken, useTokens, useUpdateAccount, useUsers } from '../api/hooks'
 import { AdminOnly } from '../components/AdminOnly'
 import { formatDateTime, PLAN_LABELS, PLANS } from '../lib/format'
+import {
+  BASE_RATE_FIELDS,
+  draftChanged,
+  draftFromRates,
+  EMPTY_DRAFT,
+  modelError,
+  parseDraft,
+  type RateDraft,
+} from '../lib/prices'
 
 function AccountRow({ a }: { a: Account }) {
   const update = useUpdateAccount()
@@ -12,7 +21,13 @@ function AccountRow({ a }: { a: Account }) {
   return (
     <tr>
       <td>
-        <input value={label} onChange={(e) => setLabel(e.target.value)} maxLength={100} />
+        <input
+          value={label}
+          onChange={(e) => setLabel(e.target.value)}
+          maxLength={100}
+          placeholder={a.email ?? a.account_uuid}
+          aria-label="Label"
+        />
         <div className="muted">{a.email ?? a.account_uuid}</div>
       </td>
       <td>
@@ -118,19 +133,31 @@ function Tokens() {
   )
 }
 
-const RATE_FIELDS: { key: keyof PriceRates; label: string }[] = [
-  { key: 'input', label: 'Input' },
-  { key: 'cache_write_5m', label: 'Cache write 5m' },
-  { key: 'cache_write_1h', label: 'Cache write 1h' },
-  { key: 'cache_read', label: 'Cache read' },
-  { key: 'output', label: 'Output' },
-]
+function RateInputs({ draft, onChange }: { draft: RateDraft; onChange: (d: RateDraft) => void }) {
+  return (
+    <>
+      {BASE_RATE_FIELDS.map((f) => (
+        <td key={f.key} className="num">
+          <input
+            className="rate"
+            type="text"
+            inputMode="decimal"
+            aria-label={f.label}
+            value={draft[f.key]}
+            onChange={(e) => onChange({ ...draft, [f.key]: e.target.value })}
+          />
+        </td>
+      ))}
+    </>
+  )
+}
 
 function PriceRow({ p }: { p: ModelPrice }) {
   const put = usePutPrice()
-  // The draft starts from the full rates, so fast_* / long_* groups are sent back unchanged on save.
-  const [draft, setDraft] = useState<PriceRates>(p.rates)
-  const dirty = RATE_FIELDS.some((f) => draft[f.key] !== p.rates[f.key])
+  const [draft, setDraft] = useState<RateDraft>(() => draftFromRates(p.rates))
+  const dirty = draftChanged(draft, p.rates)
+  const parsed = parseDraft(draft)
+  const invalid = 'error' in parsed ? parsed.error : undefined
   return (
     <tr>
       <td>
@@ -139,23 +166,72 @@ function PriceRow({ p }: { p: ModelPrice }) {
           <div className="muted">{[p.rates.fast_input !== undefined && 'fast mode', p.rates.long_input !== undefined && '>100k tier'].filter(Boolean).join(', ')}</div>
         )}
       </td>
-      {RATE_FIELDS.map((f) => (
-        <td key={f.key} className="num">
-          <input
-            className="rate"
-            type="number"
-            min={0}
-            step="0.01"
-            value={draft[f.key] ?? 0}
-            onChange={(e) => setDraft({ ...draft, [f.key]: Number(e.target.value) })}
-          />
-        </td>
-      ))}
+      <RateInputs draft={draft} onChange={setDraft} />
       <td>
-        <button disabled={!dirty || put.isPending} onClick={() => put.mutate({ model: p.model, rates: draft })}>
+        <button
+          disabled={!dirty || invalid !== undefined || put.isPending}
+          // Spread the saved rates first so fast_* / long_* groups are sent back unchanged.
+          onClick={() => 'rates' in parsed && put.mutate({ model: p.model, rates: { ...p.rates, ...parsed.rates } })}
+        >
           {put.isPending ? 'Saving…' : 'Save'}
         </button>
+        {dirty && invalid && <div className="error">{invalid}</div>}
         {put.error && <div className="error">{put.error.message}</div>}
+      </td>
+    </tr>
+  )
+}
+
+function AddPriceRow() {
+  const put = usePutPrice()
+  const [model, setModel] = useState('')
+  const [draft, setDraft] = useState<RateDraft>(EMPTY_DRAFT)
+  const [saved, setSaved] = useState<string>()
+  const touched = model !== '' || Object.values(draft).some((v) => v !== '')
+  const parsed = parseDraft(draft)
+  const invalid = modelError(model) ?? ('error' in parsed ? parsed.error : undefined)
+  const save = () => {
+    if (invalid !== undefined || !('rates' in parsed)) return
+    setSaved(undefined)
+    put.mutate(
+      { model: model.trim(), rates: parsed.rates },
+      {
+        onSuccess: (p) => {
+          setSaved(p.model)
+          setModel('')
+          setDraft(EMPTY_DRAFT)
+        },
+      },
+    )
+  }
+  return (
+    <tr>
+      <td>
+        <input
+          value={model}
+          onChange={(e) => {
+            setModel(e.target.value)
+            setSaved(undefined)
+          }}
+          placeholder="New model id, e.g. claude-opus-6"
+          aria-label="New model id"
+          maxLength={200}
+        />
+      </td>
+      <RateInputs
+        draft={draft}
+        onChange={(d) => {
+          setDraft(d)
+          setSaved(undefined)
+        }}
+      />
+      <td>
+        <button disabled={!touched || invalid !== undefined || put.isPending} onClick={save}>
+          {put.isPending ? 'Saving…' : 'Add'}
+        </button>
+        {touched && invalid && <div className="error">{invalid}</div>}
+        {put.error && <div className="error">{put.error.message}</div>}
+        {saved && <div className="muted">Saved as {saved}</div>}
       </td>
     </tr>
   )
@@ -166,19 +242,25 @@ function Prices() {
   return (
     <section className="card">
       <h2>Model prices (USD per million tokens)</h2>
-      <p className="muted">Used to estimate API-equivalent cost. Changes apply to all past usage.</p>
+      <p className="muted">
+        Used to estimate API-equivalent cost. Changes apply to all past usage. Add a row for a model that shows as
+        unpriced; the id is normalised (dates and provider prefixes removed), and an existing model's price is replaced.
+      </p>
       {q.error && <div className="error">{q.error.message}</div>}
       <table>
         <thead>
           <tr>
             <th>Model</th>
-            {RATE_FIELDS.map((f) => (
+            {BASE_RATE_FIELDS.map((f) => (
               <th key={f.key} className="num">{f.label}</th>
             ))}
             <th />
           </tr>
         </thead>
         <tbody>{q.data?.map((p) => <PriceRow key={p.model} p={p} />)}</tbody>
+        <tfoot>
+          <AddPriceRow />
+        </tfoot>
       </table>
     </section>
   )

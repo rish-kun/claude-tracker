@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { AccountRef, ByLogin, Totals } from '../api/client'
-import { accountColumns, groupSpan, planGroups, planSubtotal, sumTotals } from './accounts'
+import { accountColumns, accountName, groupSpan, planGroups, planSubtotal, sumTotals } from './accounts'
 
 const zero: Totals = {
   input: 0,
@@ -81,5 +81,13 @@ describe('planSubtotal', () => {
   })
   it('is undefined when the login used no account on the plan', () => {
     expect(planSubtotal(byAccount, 'team')).toBeUndefined()
+  })
+})
+
+describe('accountName', () => {
+  it('prefers the raw label, then email, then uuid', () => {
+    expect(accountName({ label: 'Team Max', email: 'a@x.com', account_uuid: 'u1' })).toBe('Team Max')
+    expect(accountName({ label: '', email: 'a@x.com', account_uuid: 'u1' })).toBe('a@x.com')
+    expect(accountName({ label: '', account_uuid: 'u1' })).toBe('u1')
   })
 })

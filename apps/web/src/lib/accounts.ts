@@ -1,7 +1,12 @@
-import type { AccountRef, ByLogin, Plan, Schemas, Totals } from '../api/client'
+import type { Account, AccountRef, ByLogin, Plan, Schemas, Totals } from '../api/client'
 import { PLANS } from './format'
 
 type AccountUsage = Schemas['AccountUsage']
+
+/** How to name a full Account: its admin label (raw, may be empty), else email, else uuid. */
+export function accountName(a: Pick<Account, 'label' | 'email' | 'account_uuid'>): string {
+  return a.label || a.email || a.account_uuid
+}
 
 /** Accounts seen in the data, grouped by plan (plan order, then label). */
 export function accountColumns(data: ByLogin): AccountRef[] {

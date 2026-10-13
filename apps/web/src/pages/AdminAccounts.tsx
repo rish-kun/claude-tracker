@@ -4,6 +4,7 @@ import { AdminOnly } from '../components/AdminOnly'
 import { LimitTimeline, ShareDonut, StackedDaily } from '../components/charts'
 import { LimitGauges } from '../components/limits'
 import { Cost, UnpricedNote } from '../components/tables'
+import { accountName } from '../lib/accounts'
 import { formatPct, formatTokens, formatUSD, PLAN_LABELS } from '../lib/format'
 import { pivot } from '../lib/pivot'
 import { datesBetween, type Range } from '../lib/range'
@@ -14,7 +15,7 @@ function AccountCard({ d, range }: { d: AccountDetail; range: Range }) {
   return (
     <section className="card">
       <h2>
-        {d.account.label} <span className="badge">{PLAN_LABELS[d.account.plan]}</span>{' '}
+        {accountName(d.account)} <span className="badge">{PLAN_LABELS[d.account.plan]}</span>{' '}
         <span className="muted">
           {d.account.email && <>{d.account.email} · </>}
           <Cost totals={d.totals} /> · {formatTokens(d.totals.total_tokens)} tokens
