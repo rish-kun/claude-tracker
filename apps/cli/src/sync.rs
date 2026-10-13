@@ -19,6 +19,10 @@ use crate::transcript::{self, UsageEntry};
 use crate::wire::{API_KEY_ACCOUNT, Device, IngestAccount, IngestEntry, IngestRequest, IngestSession, LimitSnapshotIn};
 
 pub const BATCH_ENTRIES: usize = 1500;
+/// Server limits per ingest request (validateIngest): distinct sessions and
+/// accounts, the latter including the limit-snapshot account.
+pub const MAX_BATCH_SESSIONS: usize = 500;
+pub const MAX_BATCH_ACCOUNTS: usize = 20;
 
 pub struct SyncOptions {
     /// Sync only this session transcript (and its subagents) instead of sweeping.
@@ -67,6 +71,12 @@ fn to_wire(a: &OAuthAccount) -> IngestAccount {
     }
 }
 
+/// The account an entry is attributed to: the timeline at its timestamp,
+/// falling back to the current account. None means API-key auth.
+fn account_for<'a>(timeline: &'a Timeline, claude: &'a ClaudeState, ts: DateTime<Utc>) -> Option<&'a OAuthAccount> {
+    timeline.account_at(ts).unwrap_or(claude.account.as_ref())
+}
+
 /// Builds one ingest request. Each entry's account comes from the timeline at
 /// the entry's timestamp, falling back to the current account.
 pub fn build_request(
@@ -81,10 +91,7 @@ pub fn build_request(
     let mut wire_entries = Vec::with_capacity(entries.len());
 
     for e in entries {
-        let account = match timeline.account_at(e.ts) {
-            Some(a) => a.cloned(),
-            None => claude.account.clone(),
-        };
+        let account = account_for(timeline, claude, e.ts).cloned();
         let account_uuid = match account {
             Some(a) => {
                 accounts.entry(a.account_uuid.clone()).or_insert_with(|| to_wire(&a));
@@ -169,6 +176,18 @@ struct Batch {
     entries: Vec<UsageEntry>,
     /// Files whose last pending entry is in this batch, with their new offsets.
     completes: Vec<(PathBuf, u64)>,
+    /// Distinct session ids and account uuids, bounded by the server's limits.
+    sessions: HashSet<String>,
+    accounts: HashSet<String>,
+}
+
+impl Batch {
+    /// Whether adding an entry for `session`/`account` stays within the limits.
+    fn fits(&self, session: &str, account: &str) -> bool {
+        self.entries.len() < BATCH_ENTRIES
+            && (self.sessions.contains(session) || self.sessions.len() < MAX_BATCH_SESSIONS)
+            && (self.accounts.contains(account) || self.accounts.len() < MAX_BATCH_ACCOUNTS)
+    }
 }
 
 pub fn run(paths: &Paths, creds: &Credentials, client: &ApiClient, opts: &SyncOptions, now: DateTime<Utc>) -> Result<SyncReport> {
@@ -236,14 +255,24 @@ pub fn run(paths: &Paths, creds: &Credentials, client: &ApiClient, opts: &SyncOp
         return Ok(report);
     }
 
-    let mut batches = vec![Batch::default()];
+    // The first batch carries the snapshot, whose account counts toward its limit.
+    let mut first = Batch::default();
+    if let Some(s) = &snapshot {
+        first.accounts.insert(s.account_uuid.clone());
+    }
+    let mut batches = vec![first];
     for (path, end, entries) in pending {
-        for chunk in entries.chunks(BATCH_ENTRIES) {
-            if batches.last().unwrap().entries.len() + chunk.len() > BATCH_ENTRIES {
+        for e in entries {
+            let account = account_for(&timeline, &claude, e.ts).map_or(API_KEY_ACCOUNT, |a| a.account_uuid.as_str()).to_string();
+            if !batches.last().unwrap().fits(&e.session_id, &account) {
                 batches.push(Batch::default());
             }
-            batches.last_mut().unwrap().entries.extend_from_slice(chunk);
+            let b = batches.last_mut().unwrap();
+            b.sessions.insert(e.session_id.clone());
+            b.accounts.insert(account);
+            b.entries.push(e);
         }
+        // A file's offset commits only with the batch holding its last entry.
         batches.last_mut().unwrap().completes.push((path, end));
     }
 
