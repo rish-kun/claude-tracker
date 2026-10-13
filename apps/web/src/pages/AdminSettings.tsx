@@ -5,12 +5,15 @@ import { AdminOnly } from '../components/AdminOnly'
 import { formatDateTime, PLAN_LABELS, PLANS } from '../lib/format'
 import {
   BASE_RATE_FIELDS,
-  draftChanged,
-  draftFromRates,
   EMPTY_DRAFT,
   modelError,
   parseDraft,
   type RateDraft,
+  rowConflict,
+  rowDirty,
+  rowDraft,
+  type RowDraft,
+  syncRowDraft,
 } from '../lib/prices'
 
 function AccountRow({ a }: { a: Account }) {
@@ -154,10 +157,22 @@ function RateInputs({ draft, onChange }: { draft: RateDraft; onChange: (d: RateD
 
 function PriceRow({ p }: { p: ModelPrice }) {
   const put = usePutPrice()
-  const [draft, setDraft] = useState<RateDraft>(() => draftFromRates(p.rates))
-  const dirty = draftChanged(draft, p.rates)
-  const parsed = parseDraft(draft)
+  const [row, setRow] = useState<RowDraft>(() => rowDraft(p.rates))
+  // Follow refetched server rates while the draft is untouched (adjusting state during render).
+  const synced = syncRowDraft(row, p.rates)
+  if (synced !== row) setRow(synced)
+  const dirty = rowDirty(synced)
+  const conflict = rowConflict(synced, p.rates)
+  const parsed = parseDraft(synced.draft)
   const invalid = 'error' in parsed ? parsed.error : undefined
+  const save = () => {
+    if (!('rates' in parsed)) return
+    put.mutate(
+      // Spread the saved rates first so fast_* / long_* groups are sent back unchanged.
+      { model: p.model, rates: { ...p.rates, ...parsed.rates } },
+      { onSuccess: (saved) => setRow(rowDraft(saved.rates)) },
+    )
+  }
   return (
     <tr>
       <td>
@@ -166,15 +181,19 @@ function PriceRow({ p }: { p: ModelPrice }) {
           <div className="muted">{[p.rates.fast_input !== undefined && 'fast mode', p.rates.long_input !== undefined && '>100k tier'].filter(Boolean).join(', ')}</div>
         )}
       </td>
-      <RateInputs draft={draft} onChange={setDraft} />
+      <RateInputs draft={synced.draft} onChange={(draft) => setRow({ ...synced, draft })} />
       <td>
-        <button
-          disabled={!dirty || invalid !== undefined || put.isPending}
-          // Spread the saved rates first so fast_* / long_* groups are sent back unchanged.
-          onClick={() => 'rates' in parsed && put.mutate({ model: p.model, rates: { ...p.rates, ...parsed.rates } })}
-        >
+        <button disabled={!dirty || conflict || invalid !== undefined || put.isPending} onClick={save}>
           {put.isPending ? 'Saving…' : 'Save'}
         </button>
+        {conflict && (
+          <div className="error">
+            Server value changed —{' '}
+            <button className="link" onClick={() => setRow(rowDraft(p.rates))}>
+              reload row
+            </button>
+          </div>
+        )}
         {dirty && invalid && <div className="error">{invalid}</div>}
         {put.error && <div className="error">{put.error.message}</div>}
       </td>

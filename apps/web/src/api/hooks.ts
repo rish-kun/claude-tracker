@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { api, unwrap, type Plan, type PriceRates } from './client'
+import { api, type ModelPrice, unwrap, type Plan, type PriceRates } from './client'
 import { type Range, rangeAdvanced, rangeKey, rangeQuery } from '../lib/range'
 
 export const PAGE_SIZE = 20
@@ -116,6 +116,11 @@ export function usePutPrice() {
   return useMutation({
     mutationFn: (v: { model: string; rates: PriceRates }) =>
       unwrap(api.PUT('/admin/prices/{model}', { params: { path: { model: v.model } }, body: v.rates })),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['admin'] }),
+    onSuccess: (saved) => {
+      // Show the saved rates at once so price rows don't fall back to the pre-save values
+      // while the refetch is in flight; the refetch then picks up any new model and costs.
+      qc.setQueryData<ModelPrice[]>(['admin', 'prices'], (old) => old?.map((p) => (p.model === saved.model ? saved : p)))
+      void qc.invalidateQueries({ queryKey: ['admin'] })
+    },
   })
 }
