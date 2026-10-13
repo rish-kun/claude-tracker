@@ -236,12 +236,19 @@ impl Batch {
     }
 }
 
+/// The server's message (apps/server/internal/httpapi/ingest.go) when a
+/// session in the request is owned by another cctrack user.
+pub const FOREIGN_SESSION_ERROR: &str = "belongs to another user";
+
 /// A part of a batch the server refused deterministically.
 struct Rejected {
     entries: Vec<UsageEntry>,
     had_snapshot: bool,
     status: u16,
     error: String,
+    /// HTTP 403 with the server's ownership error: definitive for a session
+    /// sent alone. Any other 403 (a proxy, a WAF) is not.
+    foreign: bool,
 }
 
 struct Uploader<'a> {
@@ -288,7 +295,8 @@ impl Uploader<'_> {
             }
             Err(e) => match deterministic(&e) {
                 Some(status) => {
-                    rejected.push(Rejected { entries: entries.to_vec(), had_snapshot: snap.is_some(), status, error: e.to_string() });
+                    let foreign = matches!(&e, ApiError::Http(403, m) if m.contains(FOREIGN_SESSION_ERROR));
+                    rejected.push(Rejected { entries: entries.to_vec(), had_snapshot: snap.is_some(), status, error: e.to_string(), foreign });
                     Ok(false)
                 }
                 None => Err(e),
@@ -304,10 +312,11 @@ impl Uploader<'_> {
     }
 
     /// Uploads one batch. Sessions the server refuses on their own are
-    /// quarantined, unless every refused session failed with the same non-403
-    /// status (400/409/422) and nothing at all was accepted: that looks like a
-    /// rejection of this device or client (clock skew, schema drift), so the
-    /// sync stops instead. A 403 is always quarantined.
+    /// quarantined, unless every refused session failed with the same status
+    /// and nothing at all was accepted: that looks like a rejection of this
+    /// device or client (clock skew, schema drift, a proxy's 403), so the sync
+    /// stops instead. A 403 with the server's ownership error
+    /// ([`FOREIGN_SESSION_ERROR`]) is always quarantined.
     fn send_batch(&mut self, entries: Vec<UsageEntry>, snap: Option<&UsageSnapshot>) -> Result<()> {
         // Sessions quarantined earlier in this run are not sent again.
         let entries: Vec<UsageEntry> = entries.into_iter().filter(|e| !self.quarantine.contains(&self.scope, &e.session_id)).collect();
@@ -345,24 +354,32 @@ impl Uploader<'_> {
                 log(self.paths, &format!("dropped limit snapshot captured at {}: HTTP {} ({})", s.fetched_at.to_rfc3339(), r.status, r.error));
             }
         }
-        // A 403 that persists for a session sent alone is definitive (the
-        // session belongs to another user; a bearer-token client gets no other
-        // 403 from ingest), so it is always quarantined, even when it is the
-        // only session: otherwise a lone foreign session would be retried
-        // forever and block every later batch of a sweep.
-        if let Some((_, _, first)) = failed.first()
-            && first.status != 403
+        // A session refused alone with the server's ownership 403 is
+        // definitive, so it is always quarantined, even when it is the only
+        // session: otherwise a lone foreign session would be retried forever
+        // and block every later batch of a sweep.
+        let (foreign, others): (Vec<_>, Vec<_>) = failed.into_iter().partition(|(_, _, r)| r.foreign);
+        let any_foreign = !foreign.is_empty();
+        self.quarantine_sessions(foreign)?;
+        if let Some((_, _, first)) = others.first()
             && !accepted_any
-            && failed.iter().all(|(_, _, r)| r.status == first.status)
+            && others.iter().all(|(_, _, r)| r.status == first.status)
         {
             let msg = format!(
-                "the server rejected every session in this upload with HTTP {} ({}); nothing was quarantined and the \
-                 usage will be retried. Check this machine's clock and that cctrack is up to date",
-                first.status, first.error
+                "the server rejected every session in this upload with HTTP {} ({}); {} and the usage will be retried. \
+                 Check this machine's clock, any proxy or firewall in front of the server, and that cctrack is up to date",
+                first.status,
+                first.error,
+                if any_foreign { "only sessions owned by another user were quarantined" } else { "nothing was quarantined" },
             );
             log(self.paths, &msg);
             bail!(msg);
         }
+        self.quarantine_sessions(others)
+    }
+
+    /// Quarantines refused sessions: logs, reports and persists them.
+    fn quarantine_sessions(&mut self, failed: Vec<(String, usize, Rejected)>) -> Result<()> {
         if failed.is_empty() {
             return Ok(());
         }
