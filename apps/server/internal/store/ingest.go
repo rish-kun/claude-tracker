@@ -117,16 +117,24 @@ func (s *Store) Ingest(ctx context.Context, userID int64, req *api.IngestRequest
 		if id, ok := sessionAccount[sess.SessionId]; ok {
 			acct = &id
 		}
+		// Metadata is latest-wins by observed time: a batch whose ended_at is
+		// older than the stored one (a replay or a late upload) only fills
+		// gaps and never overwrites newer account/device/cwd/branch values.
 		var got string
 		err := tx.QueryRow(ctx, `
 			INSERT INTO sessions (session_id, user_id, device_id, account_id, cwd, project, git_branch, started_at, ended_at)
 			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 			ON CONFLICT (session_id) DO UPDATE SET
-			  device_id = EXCLUDED.device_id,
-			  account_id = COALESCE(EXCLUDED.account_id, sessions.account_id),
-			  cwd = COALESCE(EXCLUDED.cwd, sessions.cwd),
-			  project = COALESCE(EXCLUDED.project, sessions.project),
-			  git_branch = COALESCE(EXCLUDED.git_branch, sessions.git_branch),
+			  device_id = CASE WHEN EXCLUDED.ended_at >= sessions.ended_at
+			    THEN COALESCE(EXCLUDED.device_id, sessions.device_id) ELSE COALESCE(sessions.device_id, EXCLUDED.device_id) END,
+			  account_id = CASE WHEN EXCLUDED.ended_at >= sessions.ended_at
+			    THEN COALESCE(EXCLUDED.account_id, sessions.account_id) ELSE COALESCE(sessions.account_id, EXCLUDED.account_id) END,
+			  cwd = CASE WHEN EXCLUDED.ended_at >= sessions.ended_at
+			    THEN COALESCE(EXCLUDED.cwd, sessions.cwd) ELSE COALESCE(sessions.cwd, EXCLUDED.cwd) END,
+			  project = CASE WHEN EXCLUDED.ended_at >= sessions.ended_at
+			    THEN COALESCE(EXCLUDED.project, sessions.project) ELSE COALESCE(sessions.project, EXCLUDED.project) END,
+			  git_branch = CASE WHEN EXCLUDED.ended_at >= sessions.ended_at
+			    THEN COALESCE(EXCLUDED.git_branch, sessions.git_branch) ELSE COALESCE(sessions.git_branch, EXCLUDED.git_branch) END,
 			  started_at = LEAST(sessions.started_at, EXCLUDED.started_at),
 			  ended_at = GREATEST(sessions.ended_at, EXCLUDED.ended_at)
 			WHERE sessions.user_id = EXCLUDED.user_id

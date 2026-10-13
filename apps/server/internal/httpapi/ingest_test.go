@@ -214,3 +214,53 @@ func TestIngestAndSummaryRejectSessionCookie(t *testing.T) {
 		t.Fatalf("summary written via cookie")
 	}
 }
+
+// TestIngestSessionMetadataLatestWins: replaying an older batch for a session
+// must not regress its account, device, cwd/project or branch; a newer batch
+// still updates them. started_at/ended_at only ever widen.
+func TestIngestSessionMetadataLatestWins(t *testing.T) {
+	h := newHarness(t)
+	tok := h.loginCLI("dev@example.com")
+	batch := func(acct, host, cwd, branch, msg string, ts time.Time) api.IngestRequest {
+		req := ingestFixture("s1", acct, entry("s1", acct, msg, "claude-opus-4-5", ts, 1, 1))
+		req.Device.Hostname = host
+		req.Sessions[0].Cwd, req.Sessions[0].GitBranch = str(cwd), str(branch)
+		req.Sessions[0].StartedAt, req.Sessions[0].EndedAt = ts, ts
+		return req
+	}
+	const q = `SELECT a.account_uuid, d.hostname, s.cwd, s.project, s.git_branch, s.started_at, s.ended_at
+		FROM sessions s JOIN claude_accounts a ON a.id = s.account_id JOIN devices d ON d.id = s.device_id
+		WHERE s.session_id = 's1'`
+	type row struct {
+		acct, host, cwd, project, branch string
+		start, end                       time.Time
+	}
+	get := func() row {
+		var r row
+		h.scan(q, &r.acct, &r.host, &r.cwd, &r.project, &r.branch, &r.start, &r.end)
+		return r
+	}
+
+	newer := batch("acc-new", "laptop", "/home/dev/new-proj", "feature", "m2", t0.Add(2*time.Hour))
+	h.ingestOK(tok, newer)
+	h.ingestOK(tok, batch("acc-old", "desktop", "/home/dev/old-proj", "main", "m1", t0))
+	got := get()
+	if got.acct != "acc-new" || got.host != "laptop" || got.cwd != "/home/dev/new-proj" ||
+		got.project != "new-proj" || got.branch != "feature" {
+		t.Fatalf("older batch regressed metadata: %+v", got)
+	}
+	if !got.start.Equal(t0) || !got.end.Equal(t0.Add(2*time.Hour)) {
+		t.Fatalf("bounds = %v..%v, want widened to %v..%v", got.start, got.end, t0, t0.Add(2*time.Hour))
+	}
+
+	// Replaying the newer batch verbatim is a no-op for metadata.
+	h.ingestOK(tok, newer)
+	if got := get(); got.acct != "acc-new" || got.branch != "feature" {
+		t.Fatalf("replay of newest batch: %+v", got)
+	}
+
+	h.ingestOK(tok, batch("acc-old", "desktop", "/home/dev/old-proj", "main", "m3", t0.Add(3*time.Hour)))
+	if got := get(); got.acct != "acc-old" || got.host != "desktop" || got.branch != "main" || got.project != "old-proj" {
+		t.Fatalf("newer batch did not update metadata: %+v", got)
+	}
+}
