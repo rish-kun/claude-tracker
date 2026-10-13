@@ -1,4 +1,4 @@
-import type { SeriesPoint } from '../api/client'
+import type { BreakdownRow, SeriesPoint } from '../api/client'
 
 export interface PivotKey {
   key: string
@@ -31,4 +31,16 @@ export function pivot(points: SeriesPoint[], dates: string[], value: 'cost_usd' 
     return row
   })
   return { rows, keys }
+}
+
+/**
+ * Relabels series whose breakdown row is entirely unpriced (cost 0, unpriced tokens > 0)
+ * as "<label> (unpriced)", so a cost chart doesn't present them as genuinely $0.
+ */
+export function markUnpriced(p: Pivot, breakdown: BreakdownRow[]): Pivot {
+  const unpriced = new Set(
+    breakdown.filter((r) => r.totals.cost_usd === 0 && r.totals.unpriced_tokens > 0).map((r) => r.key),
+  )
+  if (unpriced.size === 0) return p
+  return { ...p, keys: p.keys.map((k) => (unpriced.has(k.key) ? { ...k, label: `${k.label} (unpriced)` } : k)) }
 }

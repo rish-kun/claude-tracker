@@ -1,7 +1,29 @@
 import type { BreakdownRow, Session, SessionPage, Totals } from '../api/client'
 import { PAGE_SIZE } from '../api/hooks'
-import { formatDateTime, formatTokens, formatUSD, PLAN_LABELS } from '../lib/format'
+import { costLabel, formatDateTime, formatTokens, PLAN_LABELS, unpricedTitle } from '../lib/format'
 import { Empty } from './charts'
+
+/** Cost cell that never shows a bare $0 for unpriced usage; the marker's title explains it. */
+function Cost({ totals }: { totals: Totals }) {
+  const label = costLabel(totals)
+  if (totals.unpriced_tokens === 0) return <>{label}</>
+  const title = unpricedTitle(totals.unpriced_tokens)
+  if (label === 'unpriced') {
+    return (
+      <span className="muted" title={title}>
+        unpriced
+      </span>
+    )
+  }
+  return (
+    <>
+      {label}
+      <span className="muted" title={title}>
+        {' '}*
+      </span>
+    </>
+  )
+}
 
 export function Kpis({ totals, sessions }: { totals: Totals; sessions?: number }) {
   const cacheShare = totals.total_tokens > 0 ? totals.cache_read / totals.total_tokens : 0
@@ -9,7 +31,7 @@ export function Kpis({ totals, sessions }: { totals: Totals; sessions?: number }
     <div className="kpis">
       <div className="card kpi">
         <div className="muted">Estimated API cost</div>
-        <div className="value">{formatUSD(totals.cost_usd)}</div>
+        <div className="value">{costLabel(totals)}</div>
         {totals.unpriced_tokens > 0 && (
           <div className="muted" title="Tokens from models with no price in the price table">
             + {formatTokens(totals.unpriced_tokens)} unpriced tokens
@@ -56,8 +78,7 @@ export function BreakdownTable({ title, rows }: { title: string; rows: Breakdown
                 <td>{r.label}</td>
                 <td className="num">{formatTokens(r.totals.total_tokens)}</td>
                 <td className="num">
-                  {formatUSD(r.totals.cost_usd)}
-                  {r.totals.unpriced_tokens > 0 && <span className="muted"> *</span>}
+                  <Cost totals={r.totals} />
                 </td>
               </tr>
             ))}
@@ -84,17 +105,33 @@ function SessionRow({ s, showUser }: { s: Session; showUser: boolean }) {
       </td>
       <td>{s.summary ?? <span className="muted">No summary</span>}</td>
       <td className="num">{formatTokens(s.totals.total_tokens)}</td>
-      <td className="num">{formatUSD(s.totals.cost_usd)}</td>
+      <td className="num">
+        <Cost totals={s.totals} />
+      </td>
     </tr>
   )
 }
 
-export function SessionsTable({ page, data, onPage, showUser = false }: { page: number; data?: SessionPage; onPage: (p: number) => void; showUser?: boolean }) {
-  if (!data) return <div className="muted">Loading…</div>
-  if (data.items.length === 0) return <Empty>No sessions yet.</Empty>
+export function SessionsTable({
+  page,
+  data,
+  error,
+  onPage,
+  showUser = false,
+}: {
+  page: number
+  data?: SessionPage
+  error?: Error | null
+  onPage: (p: number) => void
+  showUser?: boolean
+}) {
+  const err = error ? <div className="error">{error.message}</div> : null
+  if (!data) return err ?? <div className="muted">Loading…</div>
+  if (data.items.length === 0) return err ?? <Empty>No sessions yet.</Empty>
   const pages = Math.max(1, Math.ceil(data.total / PAGE_SIZE))
   return (
     <>
+      {err}
       <table>
         <thead>
           <tr>

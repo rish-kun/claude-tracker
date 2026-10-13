@@ -17,6 +17,19 @@ export function formatUSD(n: number): string {
   return `$${n.toFixed(2)}`
 }
 
+/**
+ * Cost text for a totals block. Unpriced tokens carry no cost, so a $0 total that
+ * is entirely unpriced reads "unpriced" rather than implying the usage was free.
+ */
+export function costLabel(t: { cost_usd: number; unpriced_tokens: number }): string {
+  if (t.cost_usd === 0 && t.unpriced_tokens > 0) return 'unpriced'
+  return formatUSD(t.cost_usd)
+}
+
+export function unpricedTitle(unpricedTokens: number): string {
+  return `Includes ${formatTokens(unpricedTokens)} unpriced tokens (models with no price in the price table; not in the cost)`
+}
+
 export function formatPct(share: number): string {
   return `${Math.round(share * 100)}%`
 }

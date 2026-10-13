@@ -3,8 +3,8 @@ import { useMySessions, useMyUsage } from '../api/hooks'
 import { StackedDaily } from '../components/charts'
 import { LimitGauges } from '../components/limits'
 import { BreakdownTable, Kpis, SessionsTable } from '../components/tables'
-import { formatUSD } from '../lib/format'
-import { pivot } from '../lib/pivot'
+import { formatTokens, formatUSD } from '../lib/format'
+import { markUnpriced, pivot } from '../lib/pivot'
 import { datesBetween } from '../lib/range'
 import { useRange } from '../lib/rangeContext'
 
@@ -23,7 +23,13 @@ export function MyUsagePage() {
           <Kpis totals={usage.data.totals} sessions={sessions.data?.total} />
           <section className="card">
             <h2>Daily estimated cost by model</h2>
-            <StackedDaily pivot={pivot(usage.data.daily_by_model, datesBetween(range), 'cost_usd')} format={formatUSD} />
+            <StackedDaily
+              pivot={markUnpriced(pivot(usage.data.daily_by_model, datesBetween(range), 'cost_usd'), usage.data.by_model)}
+              format={formatUSD}
+            />
+            {usage.data.totals.unpriced_tokens > 0 && (
+              <div className="muted">Excludes {formatTokens(usage.data.totals.unpriced_tokens)} tokens from unpriced models.</div>
+            )}
           </section>
           <div className="grid2">
             <BreakdownTable title="By model" rows={usage.data.by_model} />
@@ -40,7 +46,7 @@ export function MyUsagePage() {
       )}
       <section className="card">
         <h2>Sessions</h2>
-        <SessionsTable page={page} data={sessions.data} onPage={setPage} />
+        <SessionsTable page={page} data={sessions.data} error={sessions.error} onPage={setPage} />
       </section>
     </>
   )
