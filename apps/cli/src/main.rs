@@ -121,7 +121,8 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 let _ = cctrack::detach::spawn(args);
             };
             let bin = cctrack::hook::TrustedBinary::current();
-            let out = cctrack::hook::run(&paths, event, &input, chrono::Utc::now(), &bin, &spawn)?;
+            let check = |c: &credentials::Credentials| cctrack::hook::check_token_online(c, cctrack::hook::SESSION_START_CHECK_TIMEOUT);
+            let out = cctrack::hook::run(&paths, event, &input, chrono::Utc::now(), &bin, &spawn, &check)?;
             if !out.is_empty() {
                 println!("{out}");
             }
