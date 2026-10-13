@@ -157,7 +157,7 @@ func (s *Server) GoogleCallback(w http.ResponseWriter, r *http.Request, params a
 
 	id, err := s.idp.Exchange(ctx, *params.Code, s.redirectURL())
 	if err != nil {
-		htmlPage(w, http.StatusBadGateway, "Google sign-in failed", err.Error(), "")
+		exchangeFailed(w, err)
 		return
 	}
 	if !s.allow.Allows(id) {
@@ -194,6 +194,14 @@ func (s *Server) GoogleCallback(w http.ResponseWriter, r *http.Request, params a
 	loopback := fmt.Sprintf("http://127.0.0.1:%d/callback?code=%s&state=%s",
 		req.CLIPort, url.QueryEscape(code), url.QueryEscape(req.CLIState))
 	http.Redirect(w, r, loopback, http.StatusFound)
+}
+
+// exchangeFailed logs why the Google code exchange or ID-token check failed
+// and shows the user only a generic page: upstream error text can carry
+// token-endpoint details that do not belong in a browser.
+func exchangeFailed(w http.ResponseWriter, err error) {
+	log.Printf("google sign-in failed: %v", err)
+	htmlPage(w, http.StatusBadGateway, "Google sign-in failed", "Google sign-in failed; please try again.", "")
 }
 
 func (s *Server) CliExchange(w http.ResponseWriter, r *http.Request) {

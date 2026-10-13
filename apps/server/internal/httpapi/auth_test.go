@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -190,5 +191,23 @@ func TestLoginStartPendingCap(t *testing.T) {
 	h.exec("UPDATE auth_requests SET expires_at = now() - interval '1 minute' WHERE state = 'flood-1'")
 	if rec := h.do("GET", "/api/auth/web/start", nil); rec.Code != http.StatusFound {
 		t.Fatalf("below cap: %d %s", rec.Code, rec.Body)
+	}
+}
+
+// TestCallbackExchangeErrorIsGeneric runs the real callback with a failing IdP.
+func TestCallbackExchangeErrorIsGeneric(t *testing.T) {
+	h := newHarness(t)
+	logs := captureLog(t)
+	_, challenge := pkcePair()
+	rec := h.do("GET", "/api/auth/cli/start?mode=paste&state=abcdefghijklmnop&code_challenge="+challenge, nil)
+	state := locationParam(t, rec, "state")
+	h.idp.err = errors.New("verify id_token: secret-detail-xyz")
+	rec = h.do("GET", "/api/auth/google/callback?code=g&state="+url.QueryEscape(state), nil)
+	if rec.Code != http.StatusBadGateway || strings.Contains(rec.Body.String(), "secret-detail-xyz") ||
+		!strings.Contains(rec.Body.String(), "Google sign-in failed; please try again.") {
+		t.Fatalf("callback: %d %s", rec.Code, rec.Body)
+	}
+	if !strings.Contains(logs.String(), "secret-detail-xyz") {
+		t.Fatalf("detail not logged: %q", logs)
 	}
 }

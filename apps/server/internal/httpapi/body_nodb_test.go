@@ -5,8 +5,11 @@ package httpapi
 // authenticate would place it) and a nil store.
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -197,5 +200,31 @@ func TestIngestAndSummaryRequireBearer(t *testing.T) {
 	// requireCLI admits a bearer principal.
 	if _, ok := s.requireCLI(httptest.NewRecorder(), requestAs(cliBearer, "POST", "/api/ingest", "")); !ok {
 		t.Fatal("bearer principal rejected")
+	}
+}
+
+// captureLog redirects the standard logger for the rest of the test.
+func captureLog(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	prev := log.Writer()
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(prev) })
+	return &buf
+}
+
+func TestExchangeFailedPageIsGeneric(t *testing.T) {
+	logs := captureLog(t)
+	rec := httptest.NewRecorder()
+	exchangeFailed(rec, errors.New(`exchange code: oauth2: "invalid_client" secret-detail-xyz`))
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status %d", rec.Code)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "Google sign-in failed; please try again.") || strings.Contains(body, "secret-detail-xyz") {
+		t.Fatalf("page leaks or lacks the generic message: %s", body)
+	}
+	if !strings.Contains(logs.String(), "secret-detail-xyz") {
+		t.Fatalf("detail not logged: %q", logs)
 	}
 }
