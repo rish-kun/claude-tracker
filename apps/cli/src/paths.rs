@@ -51,7 +51,15 @@ impl Paths {
     /// `CLAUDE_CONFIG_DIR`) is logged into its own account, so concurrent
     /// sessions in different dirs must not share observations.
     pub fn timeline(&self) -> PathBuf { self.state_dir.join(format!("accounts-{}.json", self.claude_key())) }
-    pub fn last_session(&self) -> PathBuf { self.state_dir.join("last_session.json") }
+    /// Serialises read-modify-write of [`Self::timeline`] across hooks and syncs.
+    pub fn timeline_lock(&self) -> PathBuf {
+        let mut name = self.timeline().into_os_string();
+        name.push(".lock");
+        PathBuf::from(name)
+    }
+    /// The most recently started session in this Claude config dir (the
+    /// `cctrack upload` default), so sessions in another dir don't clash.
+    pub fn last_session(&self) -> PathBuf { self.state_dir.join(format!("last_session-{}.json", self.claude_key())) }
     /// When this config dir's limit snapshot was last uploaded.
     pub fn last_snapshot(&self) -> PathBuf { self.state_dir.join(format!("last_snapshot-{}.json", self.claude_key())) }
     /// Session ids the server deterministically rejected; never re-sent.
@@ -78,6 +86,11 @@ mod tests {
         b.claude_json = PathBuf::from("/home/u/.claude-b/.claude.json");
         assert_ne!(a.timeline(), b.timeline());
         assert_ne!(a.last_snapshot(), b.last_snapshot());
+        assert_ne!(a.last_session(), b.last_session());
+        assert_ne!(a.timeline_lock(), b.timeline_lock());
+        assert_eq!(a.timeline_lock().to_string_lossy(), format!("{}.lock", a.timeline().display()));
+        let key = &a.timeline().file_name().unwrap().to_string_lossy()["accounts-".len()..][..12].to_string();
+        assert_eq!(a.last_session().file_name().unwrap().to_string_lossy(), format!("last_session-{key}.json"));
         // Stable for the same dir, and still under the shared state dir.
         assert_eq!(a.timeline(), Paths::under(Path::new("/tmp/x")).timeline());
         assert_eq!(a.timeline().parent(), Some(a.state_dir.as_path()));

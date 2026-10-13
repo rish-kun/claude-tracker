@@ -16,7 +16,7 @@ use crate::credentials::{self, Credentials};
 use crate::paths::Paths;
 use crate::scan::{self, Offsets};
 use crate::state::{read_json, write_json_atomic};
-use crate::timeline::Timeline;
+use crate::timeline::{self, Timeline};
 use crate::transcript::{self, UsageEntry};
 use crate::wire::{API_KEY_ACCOUNT, Device, IngestAccount, IngestEntry, IngestRequest, IngestSession, LimitSnapshotIn};
 
@@ -256,12 +256,10 @@ pub fn run(paths: &Paths, creds: &Credentials, client: &ApiClient, opts: &SyncOp
 
     // A missing or torn ~/.claude.json must not be recorded as API-key auth.
     let checked = claude_json::read_checked(&paths.claude_json);
-    let mut timeline = Timeline::load(&paths.timeline());
-    if let Some(c) = &checked
-        && timeline.observe(now, c.account.clone())
-    {
-        timeline.save(&paths.timeline())?;
-    }
+    let timeline = match &checked {
+        Some(c) => timeline::record(paths, now, c.account.clone()),
+        None => Timeline::load(&paths.timeline()),
+    };
     let claude = checked.unwrap_or_default();
 
     let files = match &opts.transcript {
