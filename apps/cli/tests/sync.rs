@@ -409,3 +409,20 @@ fn server_error_keeps_offsets_and_quarantines_nothing() {
     assert!(!fx.paths.last_snapshot().exists());
     mock.assert();
 }
+
+#[test]
+fn stale_unauthorized_does_not_invalidate_a_newer_login() {
+    let fx = fixture();
+    let mut server = mockito::Server::new();
+    let mock = server.mock("POST", "/api/ingest").with_status(401).with_body(r#"{"error":"invalid or revoked token"}"#).expect(1).create();
+    // The sync started with cct_test, but the user has since logged in again.
+    let newer = Credentials { token: "cct_newer".into(), ..fx.creds.clone() };
+    credentials::save(&fx.paths, &newer).unwrap();
+    let client = ApiClient::new(&server.url(), Some("cct_test"));
+    assert!(sync::run(&fx.paths, &fx.creds, &client, &opts(), now()).is_err());
+    match credentials::load(&fx.paths) {
+        AuthState::LoggedIn(c) => assert_eq!(c.token, "cct_newer"),
+        other => panic!("newer login must stay valid, got {other:?}"),
+    }
+    mock.assert();
+}

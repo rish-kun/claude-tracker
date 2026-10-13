@@ -106,7 +106,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
                     Ok(ExitCode::SUCCESS)
                 }
                 Err(cctrack::client::ApiError::Unauthorized(_)) => {
-                    credentials::mark_invalid(&paths)?;
+                    credentials::mark_invalid(&paths, &c.token)?;
                     anyhow::bail!("your token was revoked or expired — run `cctrack login`")
                 }
                 Err(e) => Err(e.into()),
@@ -239,7 +239,7 @@ fn upload(paths: &Paths, summary: &str, session: Option<String>) -> Result<ExitC
             anyhow::bail!("the server has no usage recorded for session {session_id} yet (no model calls since login?)")
         }
         Err(ApiError::Unauthorized(_)) => {
-            credentials::mark_invalid(paths)?;
+            credentials::mark_invalid(paths, &creds.token)?;
             anyhow::bail!("your token was revoked or expired — run `cctrack login`")
         }
         Err(e) => Err(e.into()),

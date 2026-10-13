@@ -44,6 +44,7 @@ impl Paths {
     }
 
     pub fn credentials(&self) -> PathBuf { self.config_dir.join("credentials.json") }
+    pub fn credentials_lock(&self) -> PathBuf { self.config_dir.join("credentials.lock") }
     pub fn offsets(&self) -> PathBuf { self.state_dir.join("offsets.json") }
     pub fn sync_lock(&self) -> PathBuf { self.state_dir.join("sync.lock") }
     /// Account timeline for this Claude config dir. Each dir (default vs

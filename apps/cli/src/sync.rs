@@ -84,10 +84,11 @@ fn deterministic(e: &ApiError) -> Option<u16> {
     }
 }
 
-/// Converts a fatal upload error; a 401 also marks the credentials invalid.
-fn fatal(paths: &Paths, e: ApiError) -> anyhow::Error {
+/// Converts a fatal upload error; a 401 also marks the credentials invalid
+/// (if they still hold the rejected `token`).
+fn fatal(paths: &Paths, token: &str, e: ApiError) -> anyhow::Error {
     match e {
-        ApiError::Unauthorized(_) => match credentials::mark_invalid(paths) {
+        ApiError::Unauthorized(_) => match credentials::mark_invalid(paths, token) {
             Ok(()) => anyhow!("the server rejected your token (revoked or expired; HTTP 401); run `cctrack login`"),
             Err(m) => anyhow!("the server rejected your token (HTTP 401; also failed to record it: {m}); run `cctrack login`"),
         },
@@ -344,7 +345,7 @@ pub fn run(paths: &Paths, creds: &Credentials, client: &ApiClient, opts: &SyncOp
                 report.duplicates += resp.duplicates;
             }
             Err(e) => {
-                let Some(status) = deterministic(&e) else { return Err(fatal(paths, e)) };
+                let Some(status) = deterministic(&e) else { return Err(fatal(paths, &creds.token, e)) };
                 // One bad session (e.g. HTTP 403: it belongs to another cctrack user
                 // after someone else logged in on this OS account) must not wedge
                 // every sync: retry per session and quarantine the ones still refused.
@@ -363,7 +364,7 @@ pub fn run(paths: &Paths, creds: &Credentials, client: &ApiClient, opts: &SyncOp
                             report.duplicates += resp.duplicates;
                         }
                         Err(e) => {
-                            let Some(status) = deterministic(&e) else { return Err(fatal(paths, e)) };
+                            let Some(status) = deterministic(&e) else { return Err(fatal(paths, &creds.token, e)) };
                             let error = e.to_string();
                             log(paths, &format!("quarantined session {session_id}: dropped {} entries, HTTP {status} ({error})", entries.len()));
                             quarantine.0.insert(session_id.to_string(), QuarantinedSession { at: now, status, error });
@@ -377,7 +378,7 @@ pub fn run(paths: &Paths, creds: &Credentials, client: &ApiClient, opts: &SyncOp
                     match client.ingest(&req) {
                         Ok(_) => {}
                         Err(e) => {
-                            let Some(status) = deterministic(&e) else { return Err(fatal(paths, e)) };
+                            let Some(status) = deterministic(&e) else { return Err(fatal(paths, &creds.token, e)) };
                             log(paths, &format!("dropped limit snapshot captured at {}: HTTP {status} ({e})", s.fetched_at.to_rfc3339()));
                         }
                     }
