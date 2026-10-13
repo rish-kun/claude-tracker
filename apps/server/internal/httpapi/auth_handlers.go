@@ -20,6 +20,10 @@ const (
 	authRequestTTL = 10 * time.Minute
 	cliCodeTTL     = 60 * time.Second
 	sessionTTL     = 30 * 24 * time.Hour
+
+	// maxPendingAuthRequests caps unexpired sign-in attempts. Login starts are
+	// unauthenticated, so without a cap anyone could grow auth_requests freely.
+	maxPendingAuthRequests = 10_000
 )
 
 var b64url = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
@@ -52,17 +56,35 @@ func (s *Server) CliStart(w http.ResponseWriter, r *http.Request, params api.Cli
 		writeError(w, http.StatusBadRequest, "code_challenge must be 43-128 base64url characters")
 		return
 	}
-	s.purgeExpired(r)
 	state := auth.RandomString(32)
-	err := s.store.CreateAuthRequest(r.Context(), store.AuthRequest{
+	if !s.startAuthRequest(w, r, store.AuthRequest{
 		State: state, Mode: mode, CLIState: params.State, CLIPort: port,
 		CodeChallenge: params.CodeChallenge, ExpiresAt: s.now().Add(authRequestTTL),
-	})
-	if err != nil {
-		s.internal(w, err)
+	}) {
 		return
 	}
 	http.Redirect(w, r, s.idp.AuthCodeURL(state, s.redirectURL()), http.StatusFound)
+}
+
+// startAuthRequest purges stale rows, refuses with 503 when too many sign-ins
+// are pending, and stores req. It writes the error response and returns false
+// on failure.
+func (s *Server) startAuthRequest(w http.ResponseWriter, r *http.Request, req store.AuthRequest) bool {
+	s.purgeExpired(r)
+	full, err := s.store.PendingAuthRequestsAtLeast(r.Context(), maxPendingAuthRequests)
+	if err != nil {
+		s.internal(w, err)
+		return false
+	}
+	if full {
+		writeError(w, http.StatusServiceUnavailable, "too many pending sign-ins, try again shortly")
+		return false
+	}
+	if err := s.store.CreateAuthRequest(r.Context(), req); err != nil {
+		s.internal(w, err)
+		return false
+	}
+	return true
 }
 
 // purgeExpired is best-effort cleanup of stale auth rows; failures are logged
@@ -92,13 +114,10 @@ func truncateDeviceName(name string) string {
 }
 
 func (s *Server) WebStart(w http.ResponseWriter, r *http.Request) {
-	s.purgeExpired(r)
 	state := auth.RandomString(32)
-	err := s.store.CreateAuthRequest(r.Context(), store.AuthRequest{
+	if !s.startAuthRequest(w, r, store.AuthRequest{
 		State: state, Mode: "web", ExpiresAt: s.now().Add(authRequestTTL),
-	})
-	if err != nil {
-		s.internal(w, err)
+	}) {
 		return
 	}
 	http.SetCookie(w, &http.Cookie{

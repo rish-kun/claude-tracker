@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"fmt"
 	"net/http"
 	"net/url"
 	"strings"
@@ -163,5 +164,31 @@ func TestBadBearerIs401AndAnonymousIs401(t *testing.T) {
 	}
 	if rec := h.do("GET", "/api/me", nil); rec.Code != http.StatusUnauthorized {
 		t.Fatalf("anonymous: %d", rec.Code)
+	}
+}
+
+// TestLoginStartPendingCap: once maxPendingAuthRequests sign-ins are pending,
+// both login starts answer 503 without inserting; expired rows do not count.
+func TestLoginStartPendingCap(t *testing.T) {
+	h := newHarness(t)
+	h.exec(fmt.Sprintf(`INSERT INTO auth_requests (state, mode, expires_at)
+		SELECT 'flood-' || g, 'web', now() + interval '10 minutes' FROM generate_series(1, %d) g`, maxPendingAuthRequests))
+	_, challenge := pkcePair()
+	cli := "/api/auth/cli/start?port=5555&state=abcdefghijklmnop&code_challenge=" + challenge
+	for _, path := range []string{cli, "/api/auth/web/start"} {
+		rec := h.do("GET", path, nil)
+		if rec.Code != http.StatusServiceUnavailable ||
+			decode[map[string]string](t, rec)["error"] != "too many pending sign-ins, try again shortly" {
+			t.Fatalf("%s at cap: %d %s", path, rec.Code, rec.Body)
+		}
+	}
+	var n int
+	h.scan("SELECT count(*) FROM auth_requests", &n)
+	if n != maxPendingAuthRequests {
+		t.Fatalf("rows = %d, want %d (no insert at cap)", n, maxPendingAuthRequests)
+	}
+	h.exec("UPDATE auth_requests SET expires_at = now() - interval '1 minute' WHERE state = 'flood-1'")
+	if rec := h.do("GET", "/api/auth/web/start", nil); rec.Code != http.StatusFound {
+		t.Fatalf("below cap: %d %s", rec.Code, rec.Body)
 	}
 }
