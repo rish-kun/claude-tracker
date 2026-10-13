@@ -205,7 +205,7 @@ Seed prices (USD per MTok — input / 5m write / 1h write / cache read / output)
 | claude-opus-5-5 | 4 | 5 | 8 | 0.20 | 20 |
 | claude-opus-5 / 4-8 / 4-7 / 4-6 / 4-5 | 5 | 6.25 | 10 | 0.5 | 25 |
 | claude-opus-4-1 / 4 | 15 | 18.75 | 30 | 1.5 | 75 |
-| claude-sonnet-5-5 | 2 | 2.5 | 4 | 0.10 | 10 |
+| claude-sonnet-5-5 | 2 | 2.5 | 4 | 0.20 | 10 |
 | claude-sonnet-5 | 2 | 2.5 | 4 | 0.2 | 10 |
 | claude-sonnet-4-6 / 4-5 / 4 | 3 | 3.75 | 6 | 0.3 | 15 |
 | claude-haiku-5-5 (≤100k prompt) | 0.10 | 0.125 | 0.20 | 0.01 | 0.50 |
