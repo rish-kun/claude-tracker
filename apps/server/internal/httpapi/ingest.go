@@ -32,6 +32,8 @@ func (s *Server) Ingest(w http.ResponseWriter, r *http.Request) {
 	}
 	res, err := s.store.Ingest(r.Context(), p.User.ID, &req)
 	if errors.Is(err, store.ErrForbidden) {
+		// The CLI quarantines a session only on this message ("belongs to
+		// another user", sync::FOREIGN_SESSION_ERROR); keep it in sync.
 		writeError(w, http.StatusForbidden, "a session in this batch belongs to another user")
 		return
 	}

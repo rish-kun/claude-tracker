@@ -703,6 +703,21 @@ fn single_session_400_rejection_stops_without_quarantine() {
 }
 
 #[test]
+fn lone_session_403_from_a_proxy_stops_without_quarantine() {
+    let fx = fixture();
+    fs::remove_file(&fx.paths.claude_json).unwrap(); // no snapshot
+    // E.g. a WAF in front of the server: 403, but not the server's ownership error.
+    let mut server = mockito::Server::new();
+    let mock = server.mock("POST", "/api/ingest").with_status(403).with_body("Forbidden by firewall policy").expect(2).create();
+    let client = ApiClient::new(&server.url(), Some("cct_test"));
+    let err = sync::run(&fx.paths, &fx.creds, &client, &opts(), now()).unwrap_err().to_string();
+    assert!(err.contains("HTTP 403") && err.contains("nothing was quarantined"), "{err}");
+    assert!(!fx.paths.quarantine().exists());
+    assert_eq!(Offsets::load(&fx.paths.offsets()).get(&fx.transcript).offset, 0);
+    mock.assert();
+}
+
+#[test]
 fn lone_foreign_session_403_is_quarantined_and_later_batches_upload() {
     let fx = fixture();
     fs::remove_file(&fx.paths.claude_json).unwrap(); // no snapshot: batch 1 is "bad" alone
