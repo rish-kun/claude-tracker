@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"cmp"
 	"net/http"
 	"strconv"
 
@@ -30,13 +31,18 @@ func series(g *report.Group[dayKey], label func(key string) string) []api.Series
 	return out
 }
 
-func byCostDesc[K comparable](g *report.Group[K]) []K {
+// byCostDesc orders keys by cost, then total tokens (both descending), then
+// key ascending so ties are deterministic whatever order SQL returned rows in.
+func byCostDesc[K cmp.Ordered](g *report.Group[K]) []K {
 	return g.SortedKeys(func(a, b K) bool {
 		ga, gb := g.Get(a), g.Get(b)
 		if ga.Cost != gb.Cost {
 			return ga.Cost > gb.Cost
 		}
-		return ga.Counts.Total() > gb.Counts.Total()
+		if ta, tb := ga.Counts.Total(), gb.Counts.Total(); ta != tb {
+			return ta > tb
+		}
+		return cmp.Less(a, b)
 	})
 }
 
@@ -59,7 +65,7 @@ func (s *Server) GetMyUsage(w http.ResponseWriter, r *http.Request, params api.G
 	}
 	rows, err := s.store.Aggregate(ctx, store.GroupBy{Day: true, Account: true}, f)
 	if err != nil {
-		s.internal(w, err)
+		s.aggregateFailed(w, err, f.TZ)
 		return
 	}
 	ids := accountIDs(rows)

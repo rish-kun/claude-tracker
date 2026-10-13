@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"time"
+	_ "time/tzdata" // embed zoneinfo: slim runtimes (e.g. Vercel) may have none, breaking ?tz=
 
 	"cctrack/server/internal/auth"
 	"cctrack/server/internal/config"

@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	_ "time/tzdata" // tz tests must not depend on the host's zoneinfo
 )
 
 func TestParseRange(t *testing.T) {

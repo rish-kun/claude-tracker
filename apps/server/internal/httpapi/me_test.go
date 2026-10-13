@@ -4,6 +4,7 @@ import (
 	"math"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -122,6 +123,17 @@ func TestMyUsageLatestLimit(t *testing.T) {
 	u := getOK[api.Usage](h, usageURL(t0.Add(-time.Hour), t0.Add(time.Hour), ""), tok)
 	if len(u.Limits) != 1 || u.Limits[0].FiveHourPct == nil || *u.Limits[0].FiveHourPct != 55 {
 		t.Fatalf("limits = %+v", u.Limits)
+	}
+	// Cross-track contract: the web app joins limits to by_account rows on
+	// Key == decimal account id, so every limit must have a matching row.
+	keys := map[string]bool{}
+	for _, row := range u.ByAccount {
+		keys[row.Key] = true
+	}
+	for _, l := range u.Limits {
+		if !keys[strconv.FormatInt(l.AccountId, 10)] {
+			t.Errorf("limit for account %d has no by_account row; by_account = %+v", l.AccountId, u.ByAccount)
+		}
 	}
 }
 

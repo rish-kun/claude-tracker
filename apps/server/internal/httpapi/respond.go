@@ -5,6 +5,8 @@ import (
 	"errors"
 	"log"
 	"net/http"
+
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
@@ -35,4 +37,22 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, dst any) bool {
 func (s *Server) internal(w http.ResponseWriter, err error) {
 	log.Printf("internal error: %v", err)
 	writeError(w, http.StatusInternalServerError, "internal error")
+}
+
+// isInvalidParam reports whether err is a Postgres invalid_parameter_value
+// (SQLSTATE 22023), which `AT TIME ZONE` raises for a zone Postgres does not
+// know even though Go's tzdata accepted it.
+func isInvalidParam(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "22023"
+}
+
+// aggregateFailed reports a failed tz-bucketed query: 400 when Postgres
+// rejected the time zone, 500 otherwise.
+func (s *Server) aggregateFailed(w http.ResponseWriter, err error, tz string) {
+	if isInvalidParam(err) {
+		writeError(w, http.StatusBadRequest, "unknown tz: "+tz)
+		return
+	}
+	s.internal(w, err)
 }
