@@ -399,7 +399,7 @@ export interface components {
             hostname: string;
             os: string;
         };
-        /** @description A Claude account seen on the device. account_uuid "api_key" means API-key auth; the server maps it to a per-user, per-device synthetic account. */
+        /** @description A Claude account seen on the device. account_uuid "api_key" means API-key auth; the server maps it to a per-user, per-device synthetic account. account_uuid must not start with "api_key:" (reserved for those synthetic accounts). */
         IngestAccount: {
             account_uuid: string;
             org_uuid?: string;
@@ -416,6 +416,7 @@ export interface components {
             /** Format: date-time */
             ended_at: string;
         };
+        /** @description Every required key must be present (not null). Each token count must be within 0-50,000,000, and input + cache_write_5m + cache_write_1h + cache_read must not exceed 100,000,000. Strings must not contain NUL characters. */
         IngestEntry: {
             session_id: string;
             account_uuid: string;
@@ -496,6 +497,11 @@ export interface components {
             total_tokens: number;
             /** Format: double */
             cost_usd: number;
+            /**
+             * Format: int64
+             * @description Tokens in this point whose model has no price (excluded from cost_usd).
+             */
+            unpriced_tokens: number;
         };
         /** @enum {string} */
         Plan: "pro" | "max_5x" | "max_20x" | "team" | "enterprise" | "api_key" | "unknown";
@@ -718,6 +724,7 @@ export interface operations {
                 content?: never;
             };
             400: components["responses"]["Error"];
+            503: components["responses"]["Error"];
         };
     };
     webStart: {
@@ -736,6 +743,7 @@ export interface operations {
                 };
                 content?: never;
             };
+            503: components["responses"]["Error"];
         };
     };
     googleCallback: {
@@ -894,7 +902,15 @@ export interface operations {
             };
             400: components["responses"]["Error"];
             401: components["responses"]["Error"];
-            403: components["responses"]["Error"];
+            /** @description A session in the batch belongs to another user, or the request used a browser session instead of a CLI bearer token. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
         };
     };
     setSessionSummary: {
@@ -921,6 +937,7 @@ export interface operations {
             };
             400: components["responses"]["Error"];
             401: components["responses"]["Error"];
+            403: components["responses"]["Error"];
             404: components["responses"]["Error"];
         };
     };
@@ -1189,7 +1206,10 @@ export interface operations {
     };
     adminPutPrice: {
         parameters: {
-            query?: never;
+            query?: {
+                /** @description When true, only create a new price; 409 if the normalised model is already priced. */
+                create?: boolean;
+            };
             header?: never;
             path: {
                 model: string;
@@ -1213,6 +1233,7 @@ export interface operations {
             };
             400: components["responses"]["Error"];
             403: components["responses"]["Error"];
+            409: components["responses"]["Error"];
         };
     };
 }

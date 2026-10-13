@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { markUnpriced, pivot } from './pivot'
 
-const p = (date: string, key: string, cost: number) => ({ date, key, label: key.toUpperCase(), total_tokens: cost * 10, cost_usd: cost })
+const p = (date: string, key: string, cost: number) => ({ date, key, label: key.toUpperCase(), total_tokens: cost * 10, cost_usd: cost, unpriced_tokens: 0 })
 
 describe('pivot', () => {
   it('fills missing cells with zero and orders keys by total', () => {
