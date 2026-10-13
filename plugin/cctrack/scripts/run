@@ -1,0 +1,50 @@
+#!/bin/sh
+# Runs the cctrack CLI for a Claude Code hook. Gate events fail closed: if the
+# binary is missing or exits non-zero, print the hook's block/deny JSON, explain
+# on stderr, and exit 2 so Claude Code blocks.
+# Usage: run hook <event>
+event="${2:-}"
+gate=0
+case "$event" in
+  user-prompt-submit|pre-tool-use) gate=1 ;;
+esac
+
+# block <message>: report a gate failure and exit 2. The message must not
+# contain double quotes or backslashes (it is embedded in JSON as-is).
+block() {
+  case "$event" in
+    user-prompt-submit) printf '{"decision":"block","reason":"%s"}\n' "$1" ;;
+    pre-tool-use) printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"%s Stop working and ask the user to fix cctrack."}}\n' "$1" ;;
+  esac
+  echo "$1" >&2
+  exit 2
+}
+
+bin="${CCTRACK_BIN:-}"
+if [ -z "$bin" ]; then
+  if command -v cctrack >/dev/null 2>&1; then
+    bin=$(command -v cctrack)
+  else
+    for candidate in "$HOME/.cargo/bin/cctrack" /opt/homebrew/bin/cctrack /usr/local/bin/cctrack "$HOME/.local/bin/cctrack"; do
+      if [ -x "$candidate" ]; then
+        bin="$candidate"
+        break
+      fi
+    done
+  fi
+fi
+
+if [ -z "$bin" ] || [ ! -x "$bin" ]; then
+  [ "$gate" -eq 1 ] && block "cctrack is not installed or not found. Install it (cargo install --path apps/cli from the cctrack repo) or set CCTRACK_BIN to its path, then run 'cctrack login'."
+  exit 0
+fi
+
+# Capture stdout so a failing child's partial output is never forwarded.
+out=$("$bin" "$@")
+rc=$?
+if [ "$rc" -ne 0 ]; then
+  [ "$gate" -eq 1 ] && block "cctrack hook failed (exit $rc); blocking until it works. Run 'cctrack status' in a terminal."
+  exit 0
+fi
+[ -n "$out" ] && printf '%s\n' "$out"
+exit 0
