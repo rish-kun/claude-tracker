@@ -104,7 +104,7 @@ Code generation: Go server interfaces/types via **oapi-codegen v2** (std `net/ht
 
 Files:
 - `~/.config/cctrack/credentials.json` (mode 0600): `{server, token, user:{id,email,name}, logged_in_at, invalid:false}`. Plain file, not the OS keychain — the gate runs on every prompt/tool call and must be fast and never trigger a keychain prompt.
-- `~/.local/state/cctrack/`: `offsets.json` (per-transcript byte offset), `sync.lock`, `accounts.json` (account timeline, §5.4), `last_snapshot.json`, `last_session.json`, `sync.log`.
+- `~/.local/state/cctrack/`: `offsets.json` (per-transcript byte offset), `sync.lock`, `accounts-<key>.json` (account timeline, §5.4) and `last_snapshot-<key>.json` — one each per Claude config dir, `<key>` being a short sha256 of its `.claude.json` path, so concurrent sessions under the default dir and `CLAUDE_CONFIG_DIR` don't mix accounts — `quarantine.json` (sessions the server deterministically rejected), `last_session.json`, `sync.log`.
 - Respects `CLAUDE_CONFIG_DIR` (default `~/.claude`) for transcripts and `~/.claude.json`.
 
 ### 5.2 Login flow (server-brokered OAuth + PKCE)
