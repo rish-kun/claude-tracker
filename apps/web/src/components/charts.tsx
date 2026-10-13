@@ -1,10 +1,11 @@
 import type { ReactNode } from 'react'
 import {
   Area, AreaChart, Bar, BarChart, CartesianGrid, Cell, Legend, Line, LineChart, Pie, PieChart,
-  ResponsiveContainer, Tooltip, XAxis, YAxis,
+  ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis,
 } from 'recharts'
 import type { LimitSnapshot } from '../api/client'
 import { formatDateTime } from '../lib/format'
+import { formatTimeTick, limitTimeline } from '../lib/limits'
 import type { Pivot, PivotKey } from '../lib/pivot'
 
 export const COLORS = ['#6366f1', '#f59e0b', '#10b981', '#ef4444', '#06b6d4', '#a855f7', '#84cc16', '#f97316', '#ec4899', '#14b8a6']
@@ -84,21 +85,37 @@ export function UserAccountBars({ rows, keys, format }: { rows: Array<Record<str
 
 export function LimitTimeline({ limits }: { limits: LimitSnapshot[] }) {
   if (limits.length < 2) return <Empty>Not enough limit snapshots in this range.</Empty>
-  const data = limits.map((l) => ({
-    t: formatDateTime(l.captured_at),
-    five: l.five_hour_pct ?? null,
-    seven: l.seven_day_pct ?? null,
-  }))
+  const { points, domain, resets } = limitTimeline(limits)
+  const span = domain[1] - domain[0]
   return (
     <ResponsiveContainer width="100%" height={220}>
-      <LineChart data={data}>
+      <LineChart data={points}>
         <CartesianGrid strokeDasharray="3 3" vertical={false} />
-        <XAxis dataKey="t" fontSize={11} minTickGap={40} />
+        {/* A numeric time axis keeps the spacing between snapshots proportional to the time between them. */}
+        <XAxis
+          dataKey="t"
+          type="number"
+          scale="time"
+          domain={['dataMin', 'dataMax']}
+          tickFormatter={(t) => formatTimeTick(Number(t), span)}
+          fontSize={11}
+          minTickGap={40}
+        />
         <YAxis domain={[0, 100]} tickFormatter={(v) => `${v}%`} width={45} fontSize={12} />
-        <Tooltip formatter={(v) => `${Number(v).toFixed(0)}%`} />
+        <Tooltip labelFormatter={(t) => formatDateTime(new Date(Number(t)).toISOString())} formatter={(v) => `${Number(v).toFixed(0)}%`} />
         <Legend />
-        <Line type="stepAfter" dataKey="five" name="5-hour window" stroke={color(0)} dot={false} connectNulls />
-        <Line type="stepAfter" dataKey="seven" name="7-day window" stroke={color(1)} dot={false} connectNulls />
+        {resets.map((r) => (
+          <ReferenceLine
+            key={`${r.label}-${r.t}`}
+            x={r.t}
+            stroke={r.label === '5h reset' ? color(0) : color(1)}
+            strokeDasharray="4 4"
+            strokeOpacity={0.7}
+            label={{ value: r.label, position: 'insideTopRight', fontSize: 10, fill: 'currentColor' }}
+          />
+        ))}
+        <Line type="stepAfter" dataKey="five" name="5-hour window" stroke={color(0)} dot={false} connectNulls isAnimationActive={false} />
+        <Line type="stepAfter" dataKey="seven" name="7-day window" stroke={color(1)} dot={false} connectNulls isAnimationActive={false} />
       </LineChart>
     </ResponsiveContainer>
   )
