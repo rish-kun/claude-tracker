@@ -68,6 +68,9 @@ func TestPasteModeShowsCode(t *testing.T) {
 	if rec.Code != 200 || !strings.Contains(rec.Body.String(), "<code>") {
 		t.Fatalf("paste page: %d %s", rec.Code, rec.Body)
 	}
+	if !strings.Contains(rec.Body.String(), "Never share this code; paste it only into your own terminal.") {
+		t.Fatalf("paste page lacks the anti-phishing warning: %s", rec.Body)
+	}
 }
 
 func TestExchangeRejectsWrongVerifierAndReuse(t *testing.T) {

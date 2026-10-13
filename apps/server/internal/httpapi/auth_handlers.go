@@ -169,7 +169,7 @@ func (s *Server) GoogleCallback(w http.ResponseWriter, r *http.Request, params a
 	}
 	if req.Mode == "paste" {
 		htmlPage(w, http.StatusOK, "Paste this code into your terminal",
-			"Signed in as "+user.Email+". The code expires in 60 seconds.", code)
+			"Signed in as "+user.Email+". The code expires in 60 seconds. Never share this code; paste it only into your own terminal.", code)
 		return
 	}
 	loopback := fmt.Sprintf("http://127.0.0.1:%d/callback?code=%s&state=%s",

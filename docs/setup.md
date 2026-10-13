@@ -42,6 +42,11 @@ Create a Neon project (or connect Neon through the Vercel marketplace). You need
 
    At least one of `ALLOWED_DOMAINS` / `ALLOWED_EMAILS` is required: the server refuses to
    start otherwise rather than let every Google account sign in.
+
+   Removing someone from `ALLOWED_DOMAINS` / `ALLOWED_EMAILS` only stops new sign-ins; it
+   does not end sessions they already have. Revoke their CLI tokens on the dashboard's
+   **Settings** page (that takes effect immediately); their browser session cookie expires
+   within 30 days.
 4. Deploy, then open `PUBLIC_URL` and sign in.
 
 ## 4. Install the CLI (each developer)
