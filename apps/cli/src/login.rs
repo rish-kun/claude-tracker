@@ -223,10 +223,12 @@ pub fn best_effort_sync(paths: &Paths, creds: &Credentials, context: &str) {
 /// server, then deletes local credentials regardless of whether the revoke
 /// succeeded.
 pub fn logout(paths: &Paths) -> Result<LogoutOutcome> {
-    let outcome = match credentials::load(paths) {
-        AuthState::LoggedIn(c) | AuthState::Invalid(c) => {
-            if !c.invalid {
-                best_effort_sync(paths, &c, "before logging out");
+    let auth = credentials::load(paths);
+    let outcome = match auth {
+        AuthState::LoggedIn(ref c) | AuthState::Invalid(ref c) => {
+            // Invalid also covers a token with a revoked marker (c.invalid unset).
+            if matches!(auth, AuthState::LoggedIn(_)) {
+                best_effort_sync(paths, c, "before logging out");
             }
             match ApiClient::new(&c.server, Some(&c.token)).revoke_own_token() {
                 Ok(()) | Err(ApiError::Unauthorized(_)) => LogoutOutcome::Revoked,

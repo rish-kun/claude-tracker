@@ -229,6 +229,11 @@ pub fn decide(event: HookEvent, input: &HookInput, gate: &Gate, bin: &TrustedBin
 /// How long SessionStart waits for the server to confirm the token.
 pub const SESSION_START_CHECK_TIMEOUT: Duration = Duration::from_secs(2);
 
+/// How long SessionStart waits for `credentials.lock` per attempt when
+/// recording a rejected token (two attempts; see
+/// [`credentials::mark_invalid_bounded`]).
+const MARK_INVALID_ATTEMPT_WAIT: Duration = Duration::from_secs(1);
+
 /// Asks the server whether stored credentials still work. Runs on its own
 /// thread (see [`check_with_deadline`]), hence `Send + Sync + 'static`.
 pub type TokenChecker = Arc<dyn Fn(&Credentials) -> TokenCheck + Send + Sync>;
@@ -292,9 +297,10 @@ pub fn run(
             if event == HookEvent::SessionStart
                 && check_with_deadline(check_token, &c, SESSION_START_CHECK_TIMEOUT) == TokenCheck::Rejected =>
         {
-            // Record it so UserPromptSubmit blocks the first prompt. Only this
-            // token is marked: a newer login saved meanwhile stays valid.
-            let marked = credentials::mark_invalid(paths, &c.token);
+            // Record it so UserPromptSubmit blocks the first prompt (falling
+            // back to a revoked marker if the credentials lock stays busy).
+            // Only this token is marked: a newer login saved meanwhile stays valid.
+            let marked = credentials::mark_invalid_bounded(paths, &c.token, MARK_INVALID_ATTEMPT_WAIT);
             match credentials::load(paths) {
                 AuthState::LoggedIn(n) if n.token != c.token => Gate::LoggedIn { email: n.user.email },
                 AuthState::LoggedOut if marked.is_ok() => Gate::LoggedOut,
@@ -643,6 +649,29 @@ mod tests {
         assert_eq!(v["decision"], "block");
         assert!(v["reason"].as_str().unwrap().contains("revoked"), "{v}");
         assert_eq!(calls.load(Ordering::SeqCst), 0, "the gate must not check online");
+    }
+
+    #[test]
+    fn session_start_401_with_a_busy_credentials_lock_still_blocks() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::under(dir.path());
+        save_creds(&paths, false);
+        // Another process holds credentials.lock for the whole hook: mark_invalid fails twice.
+        let _held = crate::state::lock_file(&paths.credentials_lock(), Duration::ZERO).unwrap().unwrap();
+        let spawn = |_: &[String]| {};
+        let start = std::time::Instant::now();
+        let out = run(&paths, HookEvent::SessionStart, r#"{"session_id":"sess-5"}"#, Utc::now(), &fixed_bin(), &spawn, &checker(|_| TokenCheck::Rejected)).unwrap();
+        assert!(start.elapsed() < Duration::from_secs(4), "bounded: {:?}", start.elapsed());
+        assert!(out.contains("NOT LOGGED IN") && out.contains("revoked"), "{out}");
+        assert!(credentials::revoked_marker(&paths, "tok").exists());
+
+        // The file is unchanged, but the marker makes the gate block.
+        let out = run(&paths, HookEvent::UserPromptSubmit, "{}", Utc::now(), &fixed_bin(), &spawn, &valid()).unwrap();
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["decision"], "block");
+        assert!(v["reason"].as_str().unwrap().contains("revoked"), "{v}");
+        let deny = run(&paths, HookEvent::PreToolUse, r#"{"tool_name":"Bash","tool_input":{"command":"ls"}}"#, Utc::now(), &fixed_bin(), &spawn, &valid()).unwrap();
+        assert!(deny.contains("\"permissionDecision\":\"deny\""), "{deny}");
     }
 
     #[test]
