@@ -104,7 +104,7 @@ Code generation: Go server interfaces/types via **oapi-codegen v2** (std `net/ht
 
 Files:
 - `~/.config/cctrack/credentials.json` (mode 0600): `{server, token, user:{id,email,name}, logged_in_at, invalid:false}`. Plain file, not the OS keychain — the gate runs on every prompt/tool call and must be fast and never trigger a keychain prompt.
-- `~/.local/state/cctrack/`: `offsets.json` (per-transcript byte offset), `sync.lock`, `accounts.json` (account timeline, §5.4), `last_snapshot.json`, `last_session.json`, `sync.log`.
+- `~/.local/state/cctrack/`: `offsets.json` (per-transcript byte offset), `sync.lock`, `accounts-<key>.json` (account timeline, §5.4) and `last_snapshot-<key>.json` — one each per Claude config dir, `<key>` being a short sha256 of its `.claude.json` path, so concurrent sessions under the default dir and `CLAUDE_CONFIG_DIR` don't mix accounts — `quarantine.json` (sessions the server deterministically rejected), `last_session.json`, `sync.log`.
 - Respects `CLAUDE_CONFIG_DIR` (default `~/.claude`) for transcripts and `~/.claude.json`.
 
 ### 5.2 Login flow (server-brokered OAuth + PKCE)
@@ -143,7 +143,7 @@ For each file, read from the stored byte offset to the last complete line:
 - Extract: `message.id`, `requestId` (optional), `sessionId`, `timestamp`, `message.model`, `cwd`, `gitBranch`, `isSidechain`; usage `input_tokens`, `output_tokens`, `cache_read_input_tokens`, `cache_creation.ephemeral_5m_input_tokens`, `cache_creation.ephemeral_1h_input_tokens` (fallback: all `cache_creation_input_tokens` → 5m), `speed` (default `standard`).
 - Dedupe on `message.id` — one API response is written as several lines with identical usage (verified on real transcripts). The server's unique key is the backstop.
 
-Batching: entries grouped into requests < 1 MB (Vercel body cap is 4.5 MB). Offsets for a file advance **only after** the server accepts the batch containing its last entry. A lock file prevents concurrent syncs (a second sync exits quietly). Sync failures are logged to `sync.log`, never surfaced as hook errors.
+Batching: entries grouped into requests < 1 MB (Vercel body cap is 4.5 MB). Offsets for a file advance **only after** the server accepts the batch containing its last entry. A lock file prevents concurrent syncs (a second sync exits quietly). Sync failures are logged to `sync.log`, never surfaced as hook errors. A deterministic rejection (`400`/`403`/`409`/`413`/`422`, e.g. a session that belongs to another cctrack user on a shared OS account) is retried once per session; sessions still refused are quarantined in `quarantine.json` — their entries dropped, logged with the HTTP status, and never sent again — so one bad session cannot wedge every later sync. `401` marks credentials invalid; `5xx`/network errors stop the sync and leave offsets for the next run.
 
 Account attribution: every SessionStart/UserPromptSubmit/Stop hook (and every sync) records the current `oauthAccount` from `~/.claude.json` (`accountUuid`, `organizationUuid`, `emailAddress`, `organizationType`, `organizationRateLimitTier`) into an account timeline whenever it changes. Each entry is attributed to the account active at its timestamp, so switching accounts before a sync does not misattribute earlier usage. If no `oauthAccount` is present (API-key auth), entries use `account_uuid: "api_key"`, which the server maps to a synthetic "API key" account per user+device.
 
@@ -205,7 +205,7 @@ Seed prices (USD per MTok — input / 5m write / 1h write / cache read / output)
 | claude-opus-5-5 | 4 | 5 | 8 | 0.20 | 20 |
 | claude-opus-5 / 4-8 / 4-7 / 4-6 / 4-5 | 5 | 6.25 | 10 | 0.5 | 25 |
 | claude-opus-4-1 / 4 | 15 | 18.75 | 30 | 1.5 | 75 |
-| claude-sonnet-5-5 | 2 | 2.5 | 4 | 0.10 | 10 |
+| claude-sonnet-5-5 | 2 | 2.5 | 4 | 0.20 | 10 |
 | claude-sonnet-5 | 2 | 2.5 | 4 | 0.2 | 10 |
 | claude-sonnet-4-6 / 4-5 / 4 | 3 | 3.75 | 6 | 0.3 | 15 |
 | claude-haiku-5-5 (≤100k prompt) | 0.10 | 0.125 | 0.20 | 0.01 | 0.50 |

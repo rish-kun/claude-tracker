@@ -1,0 +1,142 @@
+//! Extracts token usage from Claude Code transcript lines
+//! (`~/.claude/projects/<project>/<session>.jsonl`).
+
+use chrono::{DateTime, Utc};
+use serde_json::{Map, Value};
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct UsageEntry {
+    pub session_id: String,
+    pub message_id: String,
+    pub request_id: Option<String>,
+    pub model: String,
+    pub ts: DateTime<Utc>,
+    pub input: i64,
+    pub output: i64,
+    pub cache_write_5m: i64,
+    pub cache_write_1h: i64,
+    pub cache_read: i64,
+    pub speed: String,
+    pub is_subagent: bool,
+    pub cwd: Option<String>,
+    pub git_branch: Option<String>,
+}
+
+fn count(o: &Map<String, Value>, key: &str) -> i64 {
+    o.get(key).and_then(Value::as_i64).unwrap_or(0).max(0)
+}
+
+/// Returns the usage carried by an assistant line, or None for any other
+/// line (user/system lines, synthetic messages, API errors, malformed JSON).
+pub fn parse_line(line: &str, subagent_file: bool, session_hint: &str) -> Option<UsageEntry> {
+    if !line.contains("\"assistant\"") {
+        return None;
+    }
+    let v: Value = serde_json::from_str(line).ok()?;
+    if v.get("type")?.as_str()? != "assistant" {
+        return None;
+    }
+    if v.get("isApiErrorMessage").and_then(Value::as_bool) == Some(true) {
+        return None;
+    }
+    let msg = v.get("message")?;
+    let model = msg.get("model")?.as_str()?;
+    if model.is_empty() || model == "<synthetic>" {
+        return None;
+    }
+    let usage = msg.get("usage")?.as_object()?;
+    let message_id = msg.get("id")?.as_str().filter(|s| !s.is_empty())?;
+    let ts = DateTime::parse_from_rfc3339(v.get("timestamp")?.as_str()?).ok()?.with_timezone(&Utc);
+
+    let creation_total = count(usage, "cache_creation_input_tokens");
+    let (mut w5, mut w1) = match usage.get("cache_creation").and_then(Value::as_object) {
+        Some(cc) => (count(cc, "ephemeral_5m_input_tokens"), count(cc, "ephemeral_1h_input_tokens")),
+        None => (0, 0),
+    };
+    if w5 + w1 == 0 && creation_total > 0 {
+        w5 = creation_total;
+        w1 = 0;
+    }
+    let field = |k: &str| v.get(k).and_then(Value::as_str).filter(|s| !s.is_empty()).map(String::from);
+
+    Some(UsageEntry {
+        session_id: field("sessionId").unwrap_or_else(|| session_hint.to_string()),
+        message_id: message_id.to_string(),
+        request_id: field("requestId"),
+        model: model.to_string(),
+        ts,
+        input: count(usage, "input_tokens"),
+        output: count(usage, "output_tokens"),
+        cache_write_5m: w5,
+        cache_write_1h: w1,
+        cache_read: count(usage, "cache_read_input_tokens"),
+        speed: usage.get("speed").and_then(Value::as_str).unwrap_or("standard").to_string(),
+        is_subagent: subagent_file || v.get("isSidechain").and_then(Value::as_bool) == Some(true),
+        cwd: field("cwd"),
+        git_branch: field("gitBranch"),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const ASSISTANT: &str = r#"{"type":"assistant","sessionId":"s1","timestamp":"2026-10-01T10:00:00.000Z","cwd":"/home/dev/proj","gitBranch":"main","isSidechain":false,"message":{"id":"msg_1","model":"claude-opus-5-5","usage":{"input_tokens":2,"output_tokens":325,"cache_creation_input_tokens":85294,"cache_read_input_tokens":7,"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":85294},"speed":"standard"}}}"#;
+
+    #[test]
+    fn parses_assistant_usage() {
+        let e = parse_line(ASSISTANT, false, "hint").unwrap();
+        assert_eq!(e.session_id, "s1");
+        assert_eq!(e.message_id, "msg_1");
+        assert_eq!(e.request_id, None);
+        assert_eq!(e.model, "claude-opus-5-5");
+        assert_eq!((e.input, e.output, e.cache_read), (2, 325, 7));
+        assert_eq!((e.cache_write_5m, e.cache_write_1h), (0, 85294));
+        assert_eq!(e.speed, "standard");
+        assert_eq!(e.cwd.as_deref(), Some("/home/dev/proj"));
+        assert_eq!(e.git_branch.as_deref(), Some("main"));
+        assert!(!e.is_subagent);
+    }
+
+    #[test]
+    fn legacy_cache_creation_goes_to_5m() {
+        let line = r#"{"type":"assistant","sessionId":"s1","timestamp":"2026-10-01T10:00:00Z","requestId":"req_9","message":{"id":"msg_2","model":"claude-sonnet-4-5","usage":{"input_tokens":1,"output_tokens":1,"cache_creation_input_tokens":500}}}"#;
+        let e = parse_line(line, false, "hint").unwrap();
+        assert_eq!((e.cache_write_5m, e.cache_write_1h), (500, 0));
+        assert_eq!(e.request_id.as_deref(), Some("req_9"));
+    }
+
+    #[test]
+    fn subagent_flag_and_session_hint() {
+        let line = r#"{"type":"assistant","timestamp":"2026-10-01T10:00:00Z","isSidechain":true,"message":{"id":"msg_3","model":"claude-haiku-4-5","usage":{"input_tokens":1,"output_tokens":1}}}"#;
+        let e = parse_line(line, false, "parent-session").unwrap();
+        assert_eq!(e.session_id, "parent-session");
+        assert!(e.is_subagent);
+        let e = parse_line(ASSISTANT, true, "x").unwrap();
+        assert!(e.is_subagent, "files under subagents/ are subagent usage");
+    }
+
+    #[test]
+    fn skips_non_usage_lines() {
+        let skip = [
+            r#"{"type":"user","message":{"content":"hi"}}"#,
+            r#"{"type":"assistant","timestamp":"2026-10-01T10:00:00Z","message":{"id":"m","model":"<synthetic>","usage":{"input_tokens":0}}}"#,
+            r#"{"type":"assistant","isApiErrorMessage":true,"timestamp":"2026-10-01T10:00:00Z","message":{"id":"m","model":"claude-opus-5-5","usage":{"input_tokens":0}}}"#,
+            r#"{"type":"assistant","timestamp":"2026-10-01T10:00:00Z","message":{"model":"claude-opus-5-5","usage":{"input_tokens":1}}}"#,
+            r#"{"type":"assistant","timestamp":"not-a-date","message":{"id":"m","model":"claude-opus-5-5","usage":{"input_tokens":1}}}"#,
+            r#"{"type":"assistant","timestamp":"2026-10-01T10:00:00Z","message":{"id":"m","model":"claude-opus-5-5"}}"#,
+            "{truncated",
+            "",
+        ];
+        for line in skip {
+            assert!(parse_line(line, false, "h").is_none(), "should skip: {line}");
+        }
+    }
+
+    #[test]
+    fn negative_counts_clamp_to_zero() {
+        let line = r#"{"type":"assistant","timestamp":"2026-10-01T10:00:00Z","message":{"id":"m","model":"x","usage":{"input_tokens":-5,"output_tokens":3}}}"#;
+        let e = parse_line(line, false, "h").unwrap();
+        assert_eq!((e.input, e.output), (0, 3));
+    }
+}

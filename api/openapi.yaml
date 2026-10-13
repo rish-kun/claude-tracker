@@ -1,0 +1,686 @@
+openapi: 3.0.3
+info:
+  title: cctrack API
+  version: 0.1.0
+servers:
+  - url: /api
+paths:
+  /healthz:
+    get:
+      operationId: getHealth
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Health" }
+
+  /auth/cli/start:
+    get:
+      operationId: cliStart
+      description: Begin a CLI login. Redirects to Google.
+      parameters:
+        - { name: port, in: query, required: false, schema: { type: integer } }
+        - { name: state, in: query, required: true, schema: { type: string } }
+        - { name: code_challenge, in: query, required: true, schema: { type: string } }
+        - { name: mode, in: query, required: false, schema: { type: string, enum: [loopback, paste] } }
+      responses:
+        "302": { description: Redirect to Google }
+        "400": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+
+  /auth/web/start:
+    get:
+      operationId: webStart
+      responses:
+        "302": { description: Redirect to Google }
+        "503": { $ref: "#/components/responses/Error" }
+
+  /auth/google/callback:
+    get:
+      operationId: googleCallback
+      parameters:
+        - { name: code, in: query, required: false, schema: { type: string } }
+        - { name: state, in: query, required: false, schema: { type: string } }
+        - { name: error, in: query, required: false, schema: { type: string } }
+      responses:
+        "200": { description: Paste-code page, content: { text/html: { schema: { type: string } } } }
+        "302": { description: Redirect to CLI loopback or web app }
+        "400": { description: Bad or expired request, content: { text/html: { schema: { type: string } } } }
+        "403": { description: Account not allowed, content: { text/html: { schema: { type: string } } } }
+
+  /auth/cli/exchange:
+    post:
+      operationId: cliExchange
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CliExchangeRequest" }
+      responses:
+        "200":
+          description: Token issued
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CliExchangeResponse" }
+        "400": { $ref: "#/components/responses/Error" }
+
+  /auth/token:
+    delete:
+      operationId: revokeOwnToken
+      security: [{ bearer: [] }]
+      responses:
+        "204": { description: Revoked }
+        "401": { $ref: "#/components/responses/Error" }
+
+  /auth/logout:
+    post:
+      operationId: webLogout
+      responses:
+        "204": { description: Logged out }
+
+  /me:
+    get:
+      operationId: getMe
+      security: [{ bearer: [] }, { cookie: [] }]
+      responses:
+        "200":
+          description: Current user
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Me" }
+        "401": { $ref: "#/components/responses/Error" }
+
+  /ingest:
+    post:
+      operationId: ingest
+      security: [{ bearer: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/IngestRequest" }
+      responses:
+        "200":
+          description: Accepted
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/IngestResponse" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403":
+          description: >
+            A session in the batch belongs to another user, or the request used a
+            browser session instead of a CLI bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /sessions/{sessionId}/summary:
+    post:
+      operationId: setSessionSummary
+      security: [{ bearer: [] }]
+      parameters:
+        - { name: sessionId, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SummaryRequest" }
+      responses:
+        "204": { description: Saved }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+
+  /me/usage:
+    get:
+      operationId: getMyUsage
+      security: [{ bearer: [] }, { cookie: [] }]
+      parameters:
+        - $ref: "#/components/parameters/From"
+        - $ref: "#/components/parameters/To"
+        - $ref: "#/components/parameters/Tz"
+      responses:
+        "200":
+          description: Usage for the current user
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Usage" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+
+  /me/sessions:
+    get:
+      operationId: listMySessions
+      security: [{ bearer: [] }, { cookie: [] }]
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
+      responses:
+        "200":
+          description: Sessions, newest first
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SessionPage" }
+        "401": { $ref: "#/components/responses/Error" }
+
+  /admin/by-login:
+    get:
+      operationId: adminByLogin
+      security: [{ cookie: [] }]
+      parameters:
+        - $ref: "#/components/parameters/From"
+        - $ref: "#/components/parameters/To"
+        - $ref: "#/components/parameters/Tz"
+      responses:
+        "200":
+          description: Usage per login, broken down by account
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ByLogin" }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+
+  /admin/by-account:
+    get:
+      operationId: adminByAccount
+      security: [{ cookie: [] }]
+      parameters:
+        - $ref: "#/components/parameters/From"
+        - $ref: "#/components/parameters/To"
+        - $ref: "#/components/parameters/Tz"
+      responses:
+        "200":
+          description: Usage per Claude account, broken down by user
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ByAccount" }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+
+  /admin/accounts:
+    get:
+      operationId: adminListAccounts
+      security: [{ cookie: [] }]
+      responses:
+        "200":
+          description: All Claude accounts
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/Account" } }
+        "403": { $ref: "#/components/responses/Error" }
+
+  /admin/accounts/{id}:
+    patch:
+      operationId: adminUpdateAccount
+      security: [{ cookie: [] }]
+      parameters:
+        - $ref: "#/components/parameters/Id"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AccountPatch" }
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Account" }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+
+  /admin/users:
+    get:
+      operationId: adminListUsers
+      security: [{ cookie: [] }]
+      responses:
+        "200":
+          description: All users
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/AdminUser" } }
+        "403": { $ref: "#/components/responses/Error" }
+
+  /admin/users/{id}/sessions:
+    get:
+      operationId: adminListUserSessions
+      security: [{ cookie: [] }]
+      parameters:
+        - $ref: "#/components/parameters/Id"
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
+      responses:
+        "200":
+          description: The user's sessions, newest first
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SessionPage" }
+        "403": { $ref: "#/components/responses/Error" }
+
+  /admin/tokens:
+    get:
+      operationId: adminListTokens
+      security: [{ cookie: [] }]
+      responses:
+        "200":
+          description: All CLI tokens
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/ApiToken" } }
+        "403": { $ref: "#/components/responses/Error" }
+
+  /admin/tokens/{id}:
+    delete:
+      operationId: adminRevokeToken
+      security: [{ cookie: [] }]
+      parameters:
+        - $ref: "#/components/parameters/Id"
+      responses:
+        "204": { description: Revoked }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+
+  /admin/prices:
+    get:
+      operationId: adminListPrices
+      security: [{ cookie: [] }]
+      responses:
+        "200":
+          description: Model price table (USD per million tokens)
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/ModelPrice" } }
+        "403": { $ref: "#/components/responses/Error" }
+
+  /admin/prices/{model}:
+    put:
+      operationId: adminPutPrice
+      security: [{ cookie: [] }]
+      parameters:
+        - { name: model, in: path, required: true, schema: { type: string } }
+        - name: create
+          in: query
+          required: false
+          description: When true, only create a new price; 409 if the normalised model is already priced.
+          schema: { type: boolean }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PriceRates" }
+      responses:
+        "200":
+          description: Saved
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ModelPrice" }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+
+components:
+  securitySchemes:
+    bearer: { type: http, scheme: bearer }
+    cookie: { type: apiKey, in: cookie, name: cctrack_session }
+
+  parameters:
+    From: { name: from, in: query, required: true, schema: { type: string, format: date-time } }
+    To: { name: to, in: query, required: true, schema: { type: string, format: date-time } }
+    Tz: { name: tz, in: query, required: false, schema: { type: string } }
+    Limit: { name: limit, in: query, required: false, schema: { type: integer } }
+    Offset: { name: offset, in: query, required: false, schema: { type: integer } }
+    Id: { name: id, in: path, required: true, schema: { type: integer, format: int64 } }
+
+  responses:
+    Error:
+      description: Error
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+
+  schemas:
+    Health:
+      type: object
+      required: [status]
+      properties: { status: { type: string } }
+
+    Error:
+      type: object
+      required: [error]
+      properties: { error: { type: string } }
+
+    User:
+      type: object
+      required: [id, email, name]
+      properties:
+        id: { type: integer, format: int64 }
+        email: { type: string }
+        name: { type: string }
+
+    UserRef:
+      type: object
+      required: [id, email, name]
+      properties:
+        id: { type: integer, format: int64 }
+        email: { type: string }
+        name: { type: string }
+
+    Me:
+      type: object
+      required: [id, email, name, is_admin]
+      properties:
+        id: { type: integer, format: int64 }
+        email: { type: string }
+        name: { type: string }
+        is_admin: { type: boolean }
+
+    CliExchangeRequest:
+      type: object
+      required: [code, code_verifier, device_name]
+      properties:
+        code: { type: string }
+        code_verifier: { type: string }
+        device_name: { type: string }
+
+    CliExchangeResponse:
+      type: object
+      required: [token, user]
+      properties:
+        token: { type: string }
+        user: { $ref: "#/components/schemas/User" }
+
+    Device:
+      type: object
+      required: [hostname, os]
+      properties:
+        hostname: { type: string }
+        os: { type: string }
+
+    IngestAccount:
+      type: object
+      description: >
+        A Claude account seen on the device. account_uuid "api_key" means API-key auth;
+        the server maps it to a per-user, per-device synthetic account. account_uuid must
+        not start with "api_key:" (reserved for those synthetic accounts).
+      required: [account_uuid]
+      properties:
+        account_uuid: { type: string }
+        org_uuid: { type: string }
+        email: { type: string }
+        org_type: { type: string }
+        rate_limit_tier: { type: string }
+
+    IngestSession:
+      type: object
+      required: [session_id, started_at, ended_at]
+      properties:
+        session_id: { type: string }
+        cwd: { type: string }
+        git_branch: { type: string }
+        started_at: { type: string, format: date-time }
+        ended_at: { type: string, format: date-time }
+
+    IngestEntry:
+      type: object
+      description: >
+        Every required key must be present (not null). Each token count must be within
+        0-50,000,000, and input + cache_write_5m + cache_write_1h + cache_read must not
+        exceed 100,000,000. Strings must not contain NUL characters.
+      required: [session_id, account_uuid, message_id, model, ts, input, output, cache_write_5m, cache_write_1h, cache_read, is_subagent]
+      properties:
+        session_id: { type: string }
+        account_uuid: { type: string }
+        message_id: { type: string }
+        request_id: { type: string }
+        model: { type: string }
+        ts: { type: string, format: date-time }
+        input: { type: integer, format: int64 }
+        output: { type: integer, format: int64 }
+        cache_write_5m: { type: integer, format: int64 }
+        cache_write_1h: { type: integer, format: int64 }
+        cache_read: { type: integer, format: int64 }
+        speed: { type: string }
+        is_subagent: { type: boolean }
+
+    LimitSnapshotIn:
+      type: object
+      required: [account_uuid, captured_at]
+      properties:
+        account_uuid: { type: string }
+        captured_at: { type: string, format: date-time }
+        five_hour_pct: { type: number, format: double }
+        five_hour_resets_at: { type: string, format: date-time }
+        seven_day_pct: { type: number, format: double }
+        seven_day_resets_at: { type: string, format: date-time }
+
+    IngestRequest:
+      type: object
+      required: [device, accounts, sessions, entries]
+      properties:
+        device: { $ref: "#/components/schemas/Device" }
+        accounts: { type: array, items: { $ref: "#/components/schemas/IngestAccount" } }
+        sessions: { type: array, items: { $ref: "#/components/schemas/IngestSession" } }
+        entries: { type: array, items: { $ref: "#/components/schemas/IngestEntry" } }
+        limit_snapshot: { $ref: "#/components/schemas/LimitSnapshotIn" }
+
+    IngestResponse:
+      type: object
+      required: [accepted, duplicates]
+      properties:
+        accepted: { type: integer }
+        duplicates: { type: integer }
+
+    SummaryRequest:
+      type: object
+      required: [summary]
+      properties:
+        summary: { type: string }
+
+    Totals:
+      type: object
+      required: [input, output, cache_write_5m, cache_write_1h, cache_read, total_tokens, cost_usd, unpriced_tokens]
+      properties:
+        input: { type: integer, format: int64 }
+        output: { type: integer, format: int64 }
+        cache_write_5m: { type: integer, format: int64 }
+        cache_write_1h: { type: integer, format: int64 }
+        cache_read: { type: integer, format: int64 }
+        total_tokens: { type: integer, format: int64 }
+        cost_usd: { type: number, format: double }
+        unpriced_tokens: { type: integer, format: int64 }
+
+    BreakdownRow:
+      type: object
+      required: [key, label, totals]
+      properties:
+        key: { type: string }
+        label: { type: string }
+        totals: { $ref: "#/components/schemas/Totals" }
+
+    SeriesPoint:
+      type: object
+      required: [date, key, label, total_tokens, cost_usd, unpriced_tokens]
+      properties:
+        date: { type: string, description: "YYYY-MM-DD in the requested tz" }
+        key: { type: string }
+        label: { type: string }
+        total_tokens: { type: integer, format: int64 }
+        cost_usd: { type: number, format: double }
+        unpriced_tokens:
+          type: integer
+          format: int64
+          description: Tokens in this point whose model has no price (excluded from cost_usd).
+
+    Plan:
+      type: string
+      enum: [pro, max_5x, max_20x, team, enterprise, api_key, unknown]
+
+    AccountRef:
+      type: object
+      required: [id, label, plan]
+      properties:
+        id: { type: integer, format: int64 }
+        label: { type: string } # display label: admin label, else email, else account_uuid
+        plan: { $ref: "#/components/schemas/Plan" }
+        email: { type: string }
+
+    Account:
+      type: object
+      required: [id, account_uuid, label, plan, created_at]
+      properties:
+        id: { type: integer, format: int64 }
+        account_uuid: { type: string }
+        org_uuid: { type: string }
+        email: { type: string }
+        org_type: { type: string }
+        rate_limit_tier: { type: string }
+        label: { type: string } # stored admin label as-is; "" when unset
+        plan: { $ref: "#/components/schemas/Plan" }
+        created_at: { type: string, format: date-time }
+
+    AccountPatch:
+      type: object
+      properties:
+        label: { type: string }
+        plan: { $ref: "#/components/schemas/Plan" }
+
+    LimitSnapshot:
+      type: object
+      required: [account_id, captured_at]
+      properties:
+        account_id: { type: integer, format: int64 }
+        captured_at: { type: string, format: date-time }
+        five_hour_pct: { type: number, format: double }
+        five_hour_resets_at: { type: string, format: date-time }
+        seven_day_pct: { type: number, format: double }
+        seven_day_resets_at: { type: string, format: date-time }
+
+    Usage:
+      type: object
+      required: [totals, by_model, by_account, daily_by_model, limits]
+      properties:
+        totals: { $ref: "#/components/schemas/Totals" }
+        by_model: { type: array, items: { $ref: "#/components/schemas/BreakdownRow" } }
+        by_account: { type: array, items: { $ref: "#/components/schemas/BreakdownRow" } }
+        daily_by_model: { type: array, items: { $ref: "#/components/schemas/SeriesPoint" } }
+        limits: { type: array, items: { $ref: "#/components/schemas/LimitSnapshot" } }
+
+    Session:
+      type: object
+      required: [session_id, user, started_at, ended_at, totals]
+      properties:
+        session_id: { type: string }
+        user: { $ref: "#/components/schemas/UserRef" }
+        account: { $ref: "#/components/schemas/AccountRef" }
+        device_hostname: { type: string }
+        project: { type: string }
+        git_branch: { type: string }
+        started_at: { type: string, format: date-time }
+        ended_at: { type: string, format: date-time }
+        summary: { type: string }
+        totals: { $ref: "#/components/schemas/Totals" }
+
+    SessionPage:
+      type: object
+      required: [items, total]
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/Session" } }
+        total: { type: integer }
+
+    AccountUsage:
+      type: object
+      required: [account, totals]
+      properties:
+        account: { $ref: "#/components/schemas/AccountRef" }
+        totals: { $ref: "#/components/schemas/Totals" }
+
+    LoginUsage:
+      type: object
+      required: [user, totals, by_account]
+      properties:
+        user: { $ref: "#/components/schemas/UserRef" }
+        totals: { $ref: "#/components/schemas/Totals" }
+        by_account: { type: array, items: { $ref: "#/components/schemas/AccountUsage" } }
+
+    ByLogin:
+      type: object
+      required: [users, daily_by_user]
+      properties:
+        users: { type: array, items: { $ref: "#/components/schemas/LoginUsage" } }
+        daily_by_user: { type: array, items: { $ref: "#/components/schemas/SeriesPoint" } }
+
+    UserShare:
+      type: object
+      required: [user, totals, share]
+      properties:
+        user: { $ref: "#/components/schemas/UserRef" }
+        totals: { $ref: "#/components/schemas/Totals" }
+        share: { type: number, format: double, description: "0..1 share of the account's cost (token share when cost is 0)" }
+
+    AccountDetail:
+      type: object
+      required: [account, totals, by_user, daily_by_user, limits]
+      properties:
+        account: { $ref: "#/components/schemas/Account" }
+        totals: { $ref: "#/components/schemas/Totals" }
+        by_user: { type: array, items: { $ref: "#/components/schemas/UserShare" } }
+        daily_by_user: { type: array, items: { $ref: "#/components/schemas/SeriesPoint" } }
+        limits: { type: array, items: { $ref: "#/components/schemas/LimitSnapshot" } }
+
+    ByAccount:
+      type: object
+      required: [accounts]
+      properties:
+        accounts: { type: array, items: { $ref: "#/components/schemas/AccountDetail" } }
+
+    AdminUser:
+      type: object
+      required: [id, email, name, is_admin, created_at]
+      properties:
+        id: { type: integer, format: int64 }
+        email: { type: string }
+        name: { type: string }
+        is_admin: { type: boolean }
+        created_at: { type: string, format: date-time }
+        last_seen_at: { type: string, format: date-time }
+
+    ApiToken:
+      type: object
+      required: [id, user, device_name, created_at]
+      properties:
+        id: { type: integer, format: int64 }
+        user: { $ref: "#/components/schemas/UserRef" }
+        device_name: { type: string }
+        created_at: { type: string, format: date-time }
+        last_used_at: { type: string, format: date-time }
+        revoked_at: { type: string, format: date-time }
+
+    PriceRates:
+      type: object
+      description: USD per million tokens. fast_* apply to speed=fast; long_* apply when prompt > 100k tokens.
+      required: [input, cache_write_5m, cache_write_1h, cache_read, output]
+      properties:
+        input: { type: number, format: double }
+        cache_write_5m: { type: number, format: double }
+        cache_write_1h: { type: number, format: double }
+        cache_read: { type: number, format: double }
+        output: { type: number, format: double }
+        fast_input: { type: number, format: double }
+        fast_output: { type: number, format: double }
+        long_input: { type: number, format: double }
+        long_cache_write_5m: { type: number, format: double }
+        long_cache_write_1h: { type: number, format: double }
+        long_cache_read: { type: number, format: double }
+        long_output: { type: number, format: double }
+
+    ModelPrice:
+      type: object
+      required: [model, rates, updated_at]
+      properties:
+        model: { type: string }
+        rates: { $ref: "#/components/schemas/PriceRates" }
+        updated_at: { type: string, format: date-time }
