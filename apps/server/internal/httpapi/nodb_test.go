@@ -17,6 +17,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"cctrack/server/internal/api"
 	"cctrack/server/internal/store"
 )
 
@@ -64,7 +65,17 @@ func TestNoDBRequestHandling(t *testing.T) {
 		{"short state", "GET", "/api/auth/cli/start?port=5555&state=short&code_challenge=" + ch, "", nil, 400, "state"},
 		{"short challenge", "GET", "/api/auth/cli/start?port=5555&state=abcdefghijklmnop&code_challenge=tooshort", "", nil, 400, "code_challenge"},
 		{"param bind error is JSON 400", "GET", "/api/auth/cli/start?port=abc&state=abcdefghijklmnop&code_challenge=" + ch, "", nil, 400, "port"},
-		{"stub is 501", "GET", "/api/admin/prices", "", nil, 501, "not implemented"},
+		{"anonymous admin by-login", "GET", "/api/admin/by-login?from=2026-10-01T00:00:00Z&to=2026-10-02T00:00:00Z", "", nil, 401, "not logged in"},
+		{"anonymous admin by-account", "GET", "/api/admin/by-account?from=2026-10-01T00:00:00Z&to=2026-10-02T00:00:00Z", "", nil, 401, "not logged in"},
+		{"anonymous admin accounts", "GET", "/api/admin/accounts", "", nil, 401, "not logged in"},
+		{"anonymous admin account patch", "PATCH", "/api/admin/accounts/1", `{"label":"x"}`, nil, 401, "not logged in"},
+		{"anonymous admin users", "GET", "/api/admin/users", "", nil, 401, "not logged in"},
+		{"anonymous admin user sessions", "GET", "/api/admin/users/1/sessions", "", nil, 401, "not logged in"},
+		{"anonymous admin tokens", "GET", "/api/admin/tokens", "", nil, 401, "not logged in"},
+		{"anonymous admin token revoke", "DELETE", "/api/admin/tokens/1", "", nil, 401, "not logged in"},
+		{"anonymous admin prices", "GET", "/api/admin/prices", "", nil, 401, "not logged in"},
+		{"anonymous admin price put", "PUT", "/api/admin/prices/claude-opus-4-5", `{"input":1}`, nil, 401, "not logged in"},
+		{"admin PATCH cookie without CSRF header", "PATCH", "/api/admin/accounts/1", `{"label":"x"}`, []string{"Cookie", sessionCookie + "=bogus"}, 403, "X-CCTrack"},
 		{"anonymous usage", "GET", "/api/me/usage?from=2026-10-01T00:00:00Z&to=2026-10-02T00:00:00Z", "", nil, 401, "not logged in"},
 		{"anonymous sessions", "GET", "/api/me/sessions", "", nil, 401, "not logged in"},
 		{"anonymous ingest", "POST", "/api/ingest", "{}", nil, 401, "not logged in"},
@@ -144,5 +155,62 @@ func TestTruncateDeviceName(t *testing.T) {
 	}
 	if got := truncateDeviceName(" \x00 "); got != "unknown" {
 		t.Fatalf("empty name: got %q, want unknown", got)
+	}
+}
+
+func TestPriceFromBody(t *testing.T) {
+	f := func(v float64) *float64 { return &v }
+	base := func() api.PriceRates {
+		return api.PriceRates{Input: 3, CacheWrite5m: 3.75, CacheWrite1h: 6, CacheRead: 0.3, Output: 15}
+	}
+	withFast := base()
+	withFast.FastInput, withFast.FastOutput = f(6), f(30)
+	withLong := base()
+	withLong.LongInput, withLong.LongCacheWrite5m, withLong.LongCacheWrite1h = f(6), f(7.5), f(12)
+	withLong.LongCacheRead, withLong.LongOutput = f(0.6), f(22.5)
+
+	for _, c := range []struct {
+		name    string
+		model   string
+		mod     func(*api.PriceRates)
+		wantErr string
+	}{
+		{"base only", "m", nil, ""},
+		{"empty model", "", nil, "model is required"},
+		{"negative base", "m", func(r *api.PriceRates) { r.Output = -1 }, ">= 0"},
+		{"fast pair", "m", func(r *api.PriceRates) { *r = withFast }, ""},
+		{"fast input only", "m", func(r *api.PriceRates) { r.FastInput = f(6) }, "fast_input and fast_output"},
+		{"fast output only", "m", func(r *api.PriceRates) { r.FastOutput = f(6) }, "fast_input and fast_output"},
+		{"negative fast", "m", func(r *api.PriceRates) { *r = withFast; r.FastOutput = f(-1) }, ">= 0"},
+		{"all long", "m", func(r *api.PriceRates) { *r = withLong }, ""},
+		{"partial long", "m", func(r *api.PriceRates) { r.LongInput = f(6) }, "long_*"},
+		{"four of five long", "m", func(r *api.PriceRates) { *r = withLong; r.LongOutput = nil }, "long_*"},
+		{"negative long", "m", func(r *api.PriceRates) { *r = withLong; r.LongCacheRead = f(-0.1) }, ">= 0"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			body := base()
+			if c.mod != nil {
+				c.mod(&body)
+			}
+			p, msg := priceFromBody(c.model, body)
+			if c.wantErr != "" {
+				if !strings.Contains(msg, c.wantErr) {
+					t.Fatalf("msg = %q, want substring %q", msg, c.wantErr)
+				}
+				return
+			}
+			if msg != "" {
+				t.Fatalf("unexpected error %q", msg)
+			}
+			if p.Model != c.model || p.Base.Output != body.Output {
+				t.Fatalf("price = %+v", p)
+			}
+			if (p.Long != nil) != (body.LongInput != nil) || (p.Long != nil && p.Long.Output != *body.LongOutput) {
+				t.Fatalf("long = %+v", p.Long)
+			}
+			if (p.FastInput == nil) != (body.FastInput == nil) {
+				t.Fatalf("fast = %v/%v", p.FastInput, p.FastOutput)
+			}
+		})
 	}
 }

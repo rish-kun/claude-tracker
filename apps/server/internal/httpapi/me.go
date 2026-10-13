@@ -34,6 +34,12 @@ func series(g *report.Group[dayKey], label func(key string) string) []api.Series
 // byCostDesc orders keys by cost, then total tokens (both descending), then
 // key ascending so ties are deterministic whatever order SQL returned rows in.
 func byCostDesc[K cmp.Ordered](g *report.Group[K]) []K {
+	return byCostDescThen(g, cmp.Less[K])
+}
+
+// byCostDescThen is byCostDesc for keys that are not cmp.Ordered: keyLess
+// breaks ties after cost and total tokens.
+func byCostDescThen[K comparable](g *report.Group[K], keyLess func(a, b K) bool) []K {
 	return g.SortedKeys(func(a, b K) bool {
 		ga, gb := g.Get(a), g.Get(b)
 		if ga.Cost != gb.Cost {
@@ -42,7 +48,7 @@ func byCostDesc[K cmp.Ordered](g *report.Group[K]) []K {
 		if ta, tb := ga.Counts.Total(), gb.Counts.Total(); ta != tb {
 			return ta > tb
 		}
-		return cmp.Less(a, b)
+		return keyLess(a, b)
 	})
 }
 
