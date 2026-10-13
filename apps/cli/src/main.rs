@@ -30,6 +30,19 @@ enum Cmd {
         #[arg(long)]
         quiet: bool,
     },
+    /// Sign in with Google. Required before Claude Code will start work.
+    Login {
+        /// cctrack server URL, e.g. https://cctrack.example.com (remembered after first login).
+        #[arg(long, env = "CCTRACK_SERVER")]
+        server: Option<String>,
+        /// Print a URL and paste the code instead of opening a browser (SSH/headless).
+        #[arg(long)]
+        paste: bool,
+    },
+    /// Revoke this device's token and delete local credentials.
+    Logout,
+    /// Show who the server thinks you are.
+    Whoami,
 }
 
 fn main() -> ExitCode {
@@ -48,6 +61,41 @@ fn run(cli: Cli) -> Result<ExitCode> {
     match cli.cmd {
         Cmd::Status { json } => status(&paths, json),
         Cmd::Sync { transcript, quiet } => sync_cmd(&paths, transcript, quiet),
+        Cmd::Login { server, paste } => {
+            let server = server
+                .or_else(|| match credentials::load(&paths) {
+                    AuthState::LoggedIn(c) | AuthState::Invalid(c) => Some(c.server),
+                    AuthState::LoggedOut => None,
+                })
+                .ok_or_else(|| anyhow::anyhow!("pass --server https://<your-cctrack-server> (or set CCTRACK_SERVER)"))?;
+            let creds = cctrack::login::login(&paths, &server, paste, chrono::Utc::now())?;
+            println!("cctrack: logged in as {} ({})", creds.user.email, creds.server);
+            Ok(ExitCode::SUCCESS)
+        }
+        Cmd::Logout => {
+            if let AuthState::LoggedIn(c) | AuthState::Invalid(c) = credentials::load(&paths) {
+                let _ = cctrack::client::ApiClient::new(&c.server, Some(&c.token)).revoke_own_token();
+            }
+            credentials::delete(&paths)?;
+            println!("cctrack: logged out");
+            Ok(ExitCode::SUCCESS)
+        }
+        Cmd::Whoami => {
+            let AuthState::LoggedIn(c) = credentials::load(&paths) else {
+                anyhow::bail!("not logged in — run `cctrack login`");
+            };
+            match cctrack::client::ApiClient::new(&c.server, Some(&c.token)).me() {
+                Ok(me) => {
+                    println!("{} <{}>{} on {}", me.name, me.email, if me.is_admin { " (admin)" } else { "" }, c.server);
+                    Ok(ExitCode::SUCCESS)
+                }
+                Err(cctrack::client::ApiError::Unauthorized(_)) => {
+                    credentials::mark_invalid(&paths)?;
+                    anyhow::bail!("your token was revoked or expired — run `cctrack login`")
+                }
+                Err(e) => Err(e.into()),
+            }
+        }
     }
 }
 
