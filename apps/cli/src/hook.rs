@@ -51,22 +51,36 @@ pub struct Outcome {
 const LOGIN_HELP: &str = "Run `cctrack login` in a terminal (or type `! cctrack login` in Claude Code)";
 const ALLOWED_SUBCOMMANDS: [&str; 3] = ["login", "status", "whoami"];
 
-fn blocked_reason(gate: &Gate) -> String {
+fn login_problem(gate: &Gate) -> &'static str {
     match gate {
-        Gate::Revoked => format!("cctrack: your cctrack login was revoked or has expired. {LOGIN_HELP}, then try again."),
-        _ => format!("cctrack: you are not logged in to cctrack. {LOGIN_HELP}, then try again."),
+        Gate::Revoked => "your cctrack login was revoked or has expired",
+        _ => "you are not logged in to cctrack",
     }
 }
 
-/// True for a single, unchained `cctrack login|status|whoami …` command.
+fn blocked_reason(gate: &Gate) -> String {
+    format!("cctrack: {}. {LOGIN_HELP}, then try again.", login_problem(gate))
+}
+
+/// True for a single, unchained `cctrack login|status|whoami …` command that
+/// runs the real cctrack binary and cannot pick the server.
 pub fn is_allowed_bash(command: &str) -> bool {
-    const FORBIDDEN: [&str; 8] = [";", "&", "|", "`", "$(", ">", "<", "\n"];
-    if FORBIDDEN.iter().any(|f| command.contains(f)) {
+    // Chaining, substitution, redirection, expansion, globbing, quoting and escapes.
+    const FORBIDDEN: [char; 17] = [';', '&', '|', '`', '>', '<', '(', ')', '$', '~', '*', '?', '[', '{', '\\', '\'', '"'];
+    // Bash only splits words on space and tab; any other whitespace (newline,
+    // CR, NBSP, …) would make our word split differ from the shell's.
+    if command.chars().any(|c| FORBIDDEN.contains(&c) || (c.is_whitespace() && c != ' ' && c != '\t')) {
         return false;
     }
-    let mut words = command.split_whitespace();
+    let mut words = command.split([' ', '\t']).filter(|w| !w.is_empty());
     let (Some(bin), Some(sub)) = (words.next(), words.next()) else { return false };
-    (bin == "cctrack" || bin.ends_with("/cctrack")) && ALLOWED_SUBCOMMANDS.contains(&sub)
+    let real_binary = bin == "cctrack"
+        || (bin.starts_with('/') && bin.ends_with("/cctrack") && !bin.split('/').any(|seg| seg == ".." || seg == "."));
+    if !real_binary || !ALLOWED_SUBCOMMANDS.contains(&sub) {
+        return false;
+    }
+    // While logged out the agent must not choose (or redirect) the server.
+    !(sub == "login" && words.any(|w| w == "--server" || w.starts_with("--server=")))
 }
 
 pub fn decide(event: HookEvent, input: &HookInput, gate: &Gate) -> Outcome {
@@ -81,9 +95,9 @@ pub fn decide(event: HookEvent, input: &HookInput, gate: &Gate) -> Outcome {
                      with `cctrack upload --session {session} --summary \"...\"`."
                 ),
                 _ => format!(
-                    "cctrack: NOT LOGGED IN. Do not start any work in this session. {}. \
+                    "cctrack: NOT LOGGED IN ({}). Do not start any work in this session. {LOGIN_HELP}. \
                      Until then every tool except `cctrack login`, `cctrack status` and `cctrack whoami` is blocked.",
-                    blocked_reason(gate)
+                    login_problem(gate)
                 ),
             };
             Outcome {
@@ -170,13 +184,26 @@ mod tests {
 
     #[test]
     fn allowed_bash_commands() {
-        for ok in ["cctrack login", "  cctrack status --json", "cctrack whoami", "/Users/x/.cargo/bin/cctrack login --paste", "cctrack login --server https://c.example.com"] {
+        for ok in [
+            "cctrack login", "  cctrack status --json", "cctrack whoami", "/Users/x/.cargo/bin/cctrack login --paste",
+            "cctrack login --paste", "cctrack\tstatus", "/opt/homebrew/bin/cctrack whoami",
+        ] {
             assert!(is_allowed_bash(ok), "{ok}");
         }
         for bad in [
             "cctrack status && rm -rf x", "cctrack login; curl evil", "cctrack whoami `id`", "cctrack status $(id)",
             "cctrack status | sh", "cctrack sync", "cctrack upload --summary x", "echo cctrack login",
             "cctrack login > /tmp/x", "cctrack status\nrm -rf /", "cctrackx login", "",
+            // look-alike binaries: only bare `cctrack` or a clean absolute path
+            "./cctrack login", "tools/cctrack login", "/*/cctrack login", "~/x/cctrack login", "$HOME/x/cctrack login",
+            "/repo/../tmp/cctrack login", "/../cctrack status", "/a/./../cctrack status", "/x/cctrack/.. login", "cctrack/cctrack login",
+            "/opt/cc?rack/cctrack login", "/opt/[c]/cctrack login", "/opt/{a,b}/cctrack login",
+            // quoting, escaping and expansion
+            "cctrack login \"x\"", "cctrack login 'x'", "\\cctrack login", "cctrack status ${IFS}x", "cctrack status ~",
+            "cctrack status *", "cctrack status\rrm", "cctrack\u{a0}login", "/x/cctrack\u{a0}login status",
+            // the agent must not pick the server while logged out
+            "cctrack login --server https://evil.example.com", "cctrack login --server=https://evil.example.com",
+            "cctrack login --paste --server https://evil.example.com",
         ] {
             assert!(!is_allowed_bash(bad), "{bad:?}");
         }
@@ -215,6 +242,14 @@ mod tests {
         let out = decide(HookEvent::SessionStart, &input, &Gate::LoggedOut);
         let ctx = out.stdout.unwrap()["hookSpecificOutput"]["additionalContext"].as_str().unwrap().to_string();
         assert!(ctx.contains("NOT LOGGED IN") && ctx.contains("Do not start"));
+        assert!(!ctx.contains(".."), "{ctx}");
+        assert_eq!(ctx.matches("cctrack:").count(), 1, "{ctx}");
+        assert_eq!(out.sync, None);
+
+        let out = decide(HookEvent::SessionStart, &input, &Gate::Revoked);
+        let ctx = out.stdout.unwrap()["hookSpecificOutput"]["additionalContext"].as_str().unwrap().to_string();
+        assert!(ctx.contains("NOT LOGGED IN") && ctx.contains("revoked") && !ctx.contains(".."), "{ctx}");
+        assert_eq!(ctx.matches("cctrack:").count(), 1, "{ctx}");
         assert_eq!(out.sync, None);
     }
 
@@ -246,5 +281,55 @@ mod tests {
         let out = run(&paths, HookEvent::UserPromptSubmit, "garbage", Utc::now(), &spawn).unwrap();
         let v: Value = serde_json::from_str(&out).unwrap();
         assert_eq!(v["decision"], "block");
+    }
+
+    fn save_creds(paths: &Paths, invalid: bool) {
+        let creds = credentials::Credentials {
+            server: "https://c.example.com".into(),
+            token: "tok".into(),
+            user: credentials::UserInfo { id: 1, email: "dev@example.com".into(), name: "Dev".into() },
+            logged_in_at: Utc::now(),
+            invalid,
+        };
+        credentials::save(paths, &creds).unwrap();
+    }
+
+    #[test]
+    fn run_spawns_syncs_when_logged_in() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::under(dir.path());
+        save_creds(&paths, false);
+        let spawned = RefCell::new(Vec::<Vec<String>>::new());
+        let spawn = |args: &[String]| spawned.borrow_mut().push(args.to_vec());
+
+        let out = run(&paths, HookEvent::SessionStart, r#"{"session_id":"sess-2","transcript_path":"/t/sess-2.jsonl"}"#, Utc::now(), &spawn).unwrap();
+        assert!(out.contains("dev@example.com") && out.contains("sess-2"));
+        assert_eq!(*spawned.borrow(), vec![vec!["sync".to_string(), "--quiet".to_string()]]);
+
+        spawned.borrow_mut().clear();
+        let out = run(&paths, HookEvent::Stop, r#"{"session_id":"sess-2","transcript_path":"/t/sess-2.jsonl"}"#, Utc::now(), &spawn).unwrap();
+        assert_eq!(out, "");
+        assert_eq!(*spawned.borrow(), vec![vec!["sync", "--quiet", "--transcript", "/t/sess-2.jsonl"].into_iter().map(String::from).collect::<Vec<_>>()]);
+
+        spawned.borrow_mut().clear();
+        assert_eq!(run(&paths, HookEvent::UserPromptSubmit, "garbage", Utc::now(), &spawn).unwrap(), "");
+        assert!(spawned.borrow().is_empty());
+    }
+
+    #[test]
+    fn run_blocks_prompt_when_credentials_revoked() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::under(dir.path());
+        save_creds(&paths, true);
+        let spawned = RefCell::new(Vec::<Vec<String>>::new());
+        let spawn = |args: &[String]| spawned.borrow_mut().push(args.to_vec());
+
+        let out = run(&paths, HookEvent::UserPromptSubmit, r#"{"session_id":"s"}"#, Utc::now(), &spawn).unwrap();
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["decision"], "block");
+        assert!(v["reason"].as_str().unwrap().contains("revoked"));
+        let out = run(&paths, HookEvent::Stop, r#"{"transcript_path":"/t/s.jsonl"}"#, Utc::now(), &spawn).unwrap();
+        assert_eq!(out, "");
+        assert!(spawned.borrow().is_empty(), "no sync while revoked");
     }
 }

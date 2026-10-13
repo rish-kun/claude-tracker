@@ -113,8 +113,10 @@ fn run(cli: Cli) -> Result<ExitCode> {
             }
         }
         Cmd::Hook { event } => {
-            let mut input = String::new();
-            std::io::Read::read_to_string(&mut std::io::stdin(), &mut input)?;
+            // Never fail on odd stdin: the decision must depend only on credentials.
+            let mut raw = Vec::new();
+            let _ = std::io::Read::read_to_end(&mut std::io::stdin(), &mut raw);
+            let input = String::from_utf8_lossy(&raw);
             let spawn = |args: &[String]| {
                 let _ = cctrack::detach::spawn(args);
             };
