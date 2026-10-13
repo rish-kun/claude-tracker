@@ -1,11 +1,35 @@
 //! Small JSON state files, written atomically.
 
-use std::fs::{self, OpenOptions};
+use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io::Write;
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
+
+/// Opens (creating it if needed) the lock file at `path` and takes an
+/// exclusive lock on it, polling until `wait` elapses. Returns None on
+/// timeout. The lock is released when the returned file is dropped.
+pub fn lock_file(path: &Path, wait: Duration) -> Result<Option<File>> {
+    if let Some(dir) = path.parent() {
+        fs::create_dir_all(dir)?;
+    }
+    let f = OpenOptions::new().create(true).write(true).truncate(false).open(path)?;
+    let deadline = Instant::now() + wait;
+    loop {
+        match f.try_lock() {
+            Ok(()) => return Ok(Some(f)),
+            Err(TryLockError::WouldBlock) => {
+                if Instant::now() >= deadline {
+                    return Ok(None);
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Err(TryLockError::Error(e)) => return Err(e.into()),
+        }
+    }
+}
 
 pub fn read_json<T: DeserializeOwned>(path: &Path) -> Option<T> {
     let bytes = fs::read(path).ok()?;
@@ -74,5 +98,17 @@ mod tests {
         let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
         assert!(!tmp.exists());
+    }
+
+    #[test]
+    fn lock_file_is_exclusive_and_times_out() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sub/x.lock");
+        let held = lock_file(&path, Duration::ZERO).unwrap().expect("first lock");
+        let start = Instant::now();
+        assert!(lock_file(&path, Duration::from_millis(100)).unwrap().is_none());
+        assert!(start.elapsed() >= Duration::from_millis(100));
+        drop(held);
+        assert!(lock_file(&path, Duration::ZERO).unwrap().is_some());
     }
 }

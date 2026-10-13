@@ -1,12 +1,12 @@
 //! Upload new transcript usage: lock → scan → batch → upload → advance offsets.
 
-use std::collections::{BTreeMap, HashSet};
-use std::fs::{self, File, OpenOptions, TryLockError};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, SystemTime};
 
-use anyhow::{Result, anyhow};
+use anyhow::{Result, anyhow, bail};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -14,13 +14,15 @@ use crate::claude_json::{self, ClaudeState, OAuthAccount, UsageSnapshot};
 use crate::client::{ApiClient, ApiError};
 use crate::credentials::{self, Credentials};
 use crate::paths::Paths;
-use crate::scan::{self, Offsets};
-use crate::state::{read_json, write_json_atomic};
-use crate::timeline::Timeline;
+use crate::scan::{self, Offsets, Position};
+use crate::state::{lock_file, read_json, write_json_atomic};
+use crate::timeline::{self, Timeline};
 use crate::transcript::{self, UsageEntry};
 use crate::wire::{API_KEY_ACCOUNT, Device, IngestAccount, IngestEntry, IngestRequest, IngestSession, LimitSnapshotIn};
 
 pub const BATCH_ENTRIES: usize = 1500;
+/// Largest serialized ingest request sent (the server accepts up to 1 MiB).
+pub const MAX_BATCH_BYTES: usize = 900_000;
 /// Server limits per ingest request (validateIngest): distinct sessions and
 /// accounts, the latter including the limit-snapshot account.
 pub const MAX_BATCH_SESSIONS: usize = 500;
@@ -54,40 +56,43 @@ pub fn log(paths: &Paths, msg: &str) {
     }
 }
 
-/// A session the server refused with a deterministic 4xx even on its own.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
-pub struct QuarantinedSession {
-    pub at: DateTime<Utc>,
-    pub status: u16,
-    pub error: String,
-}
-
-/// Sessions never to upload again, keyed by session id (`quarantine.json`).
+/// Sessions never to upload again (`quarantine.json`), per cctrack identity:
+/// `{"<server>|<user_id>": [session ids]}`. A session refused for one user
+/// (e.g. it belongs to someone else) may be fine for another.
 #[derive(Serialize, Deserialize, Default, Debug)]
 #[serde(transparent)]
-pub struct Quarantine(pub BTreeMap<String, QuarantinedSession>);
+pub struct Quarantine(pub BTreeMap<String, BTreeSet<String>>);
 
 impl Quarantine {
     pub fn load(path: &Path) -> Self {
         read_json(path).unwrap_or_default()
     }
-    pub fn contains(&self, session_id: &str) -> bool {
-        self.0.contains_key(session_id)
+    /// The key for the identity in `creds`.
+    pub fn scope(creds: &Credentials) -> String {
+        format!("{}|{}", creds.server, creds.user.id)
+    }
+    pub fn contains(&self, scope: &str, session_id: &str) -> bool {
+        self.0.get(scope).is_some_and(|s| s.contains(session_id))
+    }
+    fn insert(&mut self, scope: &str, session_id: &str) {
+        self.0.entry(scope.to_string()).or_default().insert(session_id.to_string());
     }
 }
 
 /// Errors that will recur no matter how often the same request is retried.
+/// 413 is not one of them: a smaller request will do.
 fn deterministic(e: &ApiError) -> Option<u16> {
     match e {
-        ApiError::Http(code @ (400 | 403 | 409 | 413 | 422), _) => Some(*code),
+        ApiError::Http(code @ (400 | 403 | 409 | 422), _) => Some(*code),
         _ => None,
     }
 }
 
-/// Converts a fatal upload error; a 401 also marks the credentials invalid.
-fn fatal(paths: &Paths, e: ApiError) -> anyhow::Error {
+/// Converts a fatal upload error; a 401 also marks the credentials invalid
+/// (if they still hold the rejected `token`).
+fn fatal(paths: &Paths, token: &str, e: ApiError) -> anyhow::Error {
     match e {
-        ApiError::Unauthorized(_) => match credentials::mark_invalid(paths) {
+        ApiError::Unauthorized(_) => match credentials::mark_invalid(paths, token) {
             Ok(()) => anyhow!("the server rejected your token (revoked or expired; HTTP 401); run `cctrack login`"),
             Err(m) => anyhow!("the server rejected your token (HTTP 401; also failed to record it: {m}); run `cctrack login`"),
         },
@@ -97,22 +102,6 @@ fn fatal(paths: &Paths, e: ApiError) -> anyhow::Error {
 
 pub fn hostname() -> String {
     gethostname::gethostname().to_string_lossy().into_owned()
-}
-
-fn acquire(f: &File, wait: Duration) -> Result<bool> {
-    let deadline = Instant::now() + wait;
-    loop {
-        match f.try_lock() {
-            Ok(()) => return Ok(true),
-            Err(TryLockError::WouldBlock) => {
-                if Instant::now() >= deadline {
-                    return Ok(false);
-                }
-                std::thread::sleep(Duration::from_millis(200));
-            }
-            Err(TryLockError::Error(e)) => return Err(e.into()),
-        }
-    }
 }
 
 fn to_wire(a: &OAuthAccount) -> IngestAccount {
@@ -228,8 +217,10 @@ pub fn build_request(
 #[derive(Default)]
 struct Batch {
     entries: Vec<UsageEntry>,
-    /// Files whose last pending entry is in this batch, with their new offsets.
-    completes: Vec<(PathBuf, u64)>,
+    /// Files whose offsets commit once this batch is accepted (or its
+    /// refused sessions quarantined): files whose last pending entry is in
+    /// it, and files whose new entries all duplicate entries already queued.
+    completes: Vec<(PathBuf, Position)>,
     /// Distinct session ids and account uuids, bounded by the server's limits.
     sessions: HashSet<String>,
     accounts: HashSet<String>,
@@ -237,6 +228,7 @@ struct Batch {
 
 impl Batch {
     /// Whether adding an entry for `session`/`account` stays within the limits.
+    /// The byte cap is enforced when sending (see [`Uploader::send_split`]).
     fn fits(&self, session: &str, account: &str) -> bool {
         self.entries.len() < BATCH_ENTRIES
             && (self.sessions.contains(session) || self.sessions.len() < MAX_BATCH_SESSIONS)
@@ -244,23 +236,152 @@ impl Batch {
     }
 }
 
+/// A part of a batch the server refused deterministically.
+struct Rejected {
+    entries: Vec<UsageEntry>,
+    had_snapshot: bool,
+    status: u16,
+    error: String,
+}
+
+struct Uploader<'a> {
+    paths: &'a Paths,
+    creds: &'a Credentials,
+    client: &'a ApiClient,
+    device: Device,
+    timeline: &'a Timeline,
+    claude: &'a ClaudeState,
+    scope: String,
+    quarantine: Quarantine,
+    report: SyncReport,
+}
+
+impl Uploader<'_> {
+    fn fatal(&self, e: ApiError) -> anyhow::Error {
+        fatal(self.paths, &self.creds.token, e)
+    }
+
+    /// Sends `entries` (with `snap`), halving the request while its JSON
+    /// exceeds [`MAX_BATCH_BYTES`] or the server answers 413. Deterministic
+    /// rejections are collected in `rejected`; returns whether any part was
+    /// accepted. A single entry refused with 413 is an error (never quarantined).
+    fn send_split(&mut self, entries: &[UsageEntry], snap: Option<&UsageSnapshot>, rejected: &mut Vec<Rejected>) -> Result<bool, ApiError> {
+        let req = build_request(&self.device, entries, self.timeline, self.claude, snap);
+        let size = serde_json::to_vec(&req).map_or(usize::MAX, |v| v.len());
+        if size > MAX_BATCH_BYTES && entries.len() > 1 {
+            return self.split(entries, snap, rejected);
+        }
+        match self.client.ingest(&req) {
+            Ok(resp) => {
+                self.report.batches += 1;
+                self.report.entries_sent += entries.len();
+                self.report.accepted += resp.accepted;
+                self.report.duplicates += resp.duplicates;
+                Ok(true)
+            }
+            Err(ApiError::Http(413, m)) if entries.len() > 1 => {
+                log(self.paths, &format!("ingest of {} entries ({size} bytes) refused as too large (HTTP 413: {m}); splitting", entries.len()));
+                self.split(entries, snap, rejected)
+            }
+            Err(ApiError::Http(413, m)) => {
+                Err(ApiError::Http(413, format!("the server refused a {size}-byte upload of {} entries as too large: {m}", entries.len())))
+            }
+            Err(e) => match deterministic(&e) {
+                Some(status) => {
+                    rejected.push(Rejected { entries: entries.to_vec(), had_snapshot: snap.is_some(), status, error: e.to_string() });
+                    Ok(false)
+                }
+                None => Err(e),
+            },
+        }
+    }
+
+    fn split(&mut self, entries: &[UsageEntry], snap: Option<&UsageSnapshot>, rejected: &mut Vec<Rejected>) -> Result<bool, ApiError> {
+        let (a, b) = entries.split_at(entries.len() / 2);
+        let first = self.send_split(a, snap, rejected)?;
+        let second = self.send_split(b, None, rejected)?;
+        Ok(first || second)
+    }
+
+    /// Uploads one batch. Sessions the server refuses on their own are
+    /// quarantined, unless every refused session failed with the same status
+    /// and nothing at all was accepted: that looks like a rejection of this
+    /// device or client (clock skew, schema drift), so the sync stops instead.
+    fn send_batch(&mut self, entries: Vec<UsageEntry>, snap: Option<&UsageSnapshot>) -> Result<()> {
+        // Sessions quarantined earlier in this run are not sent again.
+        let entries: Vec<UsageEntry> = entries.into_iter().filter(|e| !self.quarantine.contains(&self.scope, &e.session_id)).collect();
+        if entries.is_empty() && snap.is_none() {
+            return Ok(());
+        }
+        let mut rejected = Vec::new();
+        let mut accepted_any = self.send_split(&entries, snap, &mut rejected).map_err(|e| self.fatal(e))?;
+        if rejected.is_empty() {
+            return Ok(());
+        }
+        let snapshot_rejected = rejected.iter().any(|r| r.had_snapshot);
+        // One bad session (e.g. HTTP 403: it belongs to another cctrack user
+        // after someone else logged in on this OS account) must not wedge
+        // every sync: retry per session.
+        let mut by_session: BTreeMap<String, Vec<UsageEntry>> = BTreeMap::new();
+        for r in rejected {
+            log(self.paths, &format!("ingest of {} entries rejected with HTTP {} ({}); retrying per session", r.entries.len(), r.status, r.error));
+            for e in r.entries {
+                by_session.entry(e.session_id.clone()).or_default().push(e);
+            }
+        }
+        let mut failed: Vec<(String, usize, Rejected)> = Vec::new();
+        for (session_id, entries) in by_session {
+            let mut r = Vec::new();
+            accepted_any |= self.send_split(&entries, None, &mut r).map_err(|e| self.fatal(e))?;
+            if let Some(first) = r.into_iter().next() {
+                failed.push((session_id, entries.len(), first));
+            }
+        }
+        if snapshot_rejected && let Some(s) = snap {
+            let mut r = Vec::new();
+            accepted_any |= self.send_split(&[], Some(s), &mut r).map_err(|e| self.fatal(e))?;
+            if let Some(r) = r.first() {
+                log(self.paths, &format!("dropped limit snapshot captured at {}: HTTP {} ({})", s.fetched_at.to_rfc3339(), r.status, r.error));
+            }
+        }
+        if let Some((_, _, first)) = failed.first()
+            && !accepted_any
+            && failed.iter().all(|(_, _, r)| r.status == first.status)
+        {
+            let msg = format!(
+                "the server rejected every session in this upload with HTTP {} ({}); nothing was quarantined and the \
+                 usage will be retried. Check this machine's clock and that cctrack is up to date",
+                first.status, first.error
+            );
+            log(self.paths, &msg);
+            bail!(msg);
+        }
+        if failed.is_empty() {
+            return Ok(());
+        }
+        for (session_id, n, r) in failed {
+            log(self.paths, &format!("quarantined session {session_id}: dropped {n} entries, HTTP {} ({})", r.status, r.error));
+            self.quarantine.insert(&self.scope, &session_id);
+            self.report.quarantined.push(session_id);
+        }
+        write_json_atomic(&self.paths.quarantine(), &self.quarantine, None)?;
+        Ok(())
+    }
+}
+
 pub fn run(paths: &Paths, creds: &Credentials, client: &ApiClient, opts: &SyncOptions, now: DateTime<Utc>) -> Result<SyncReport> {
     let mut report = SyncReport::default();
-    fs::create_dir_all(&paths.state_dir)?;
-    let lock = OpenOptions::new().create(true).write(true).truncate(false).open(paths.sync_lock())?;
-    if !acquire(&lock, opts.wait_for_lock)? {
+    let Some(_lock) = lock_file(&paths.sync_lock(), opts.wait_for_lock)? else {
         report.skipped_locked = true;
         return Ok(report);
-    }
+    };
 
     // A missing or torn ~/.claude.json must not be recorded as API-key auth.
     let checked = claude_json::read_checked(&paths.claude_json);
-    let mut timeline = Timeline::load(&paths.timeline());
-    if let Some(c) = &checked
-        && timeline.observe(now, c.account.clone())
-    {
-        timeline.save(&paths.timeline())?;
-    }
+    let timeline = match &checked {
+        Some(c) => timeline::record(paths, now, c.account.clone()),
+        None => Timeline::load(&paths.timeline()),
+    };
     let claude = checked.unwrap_or_default();
 
     let files = match &opts.transcript {
@@ -271,30 +392,37 @@ pub fn run(paths: &Paths, creds: &Credentials, client: &ApiClient, opts: &SyncOp
         }
     };
 
-    let mut quarantine = Quarantine::load(&paths.quarantine());
+    let scope = Quarantine::scope(creds);
+    let quarantine = Quarantine::load(&paths.quarantine());
     let mut offsets = Offsets::load(&paths.offsets());
     let mut seen = HashSet::new();
-    let mut pending: Vec<(PathBuf, u64, Vec<UsageEntry>)> = Vec::new();
+    // Files with new uploadable usage. A file's entries may be empty when
+    // they all duplicate entries queued from an earlier file (e.g. a copied
+    // transcript): its offset then commits with the batch carrying those.
+    let mut pending: Vec<(PathBuf, Position, Vec<UsageEntry>)> = Vec::new();
     for f in &files {
-        let start = offsets.get(&f.path);
-        let Ok(new) = scan::read_new_lines(&f.path, start) else { continue };
-        if new.end == start {
+        let stored = offsets.get(&f.path);
+        let Ok(new) = scan::read_new_lines(&f.path, &stored) else { continue };
+        if new.lines.is_empty() {
+            if new.end != stored {
+                offsets.set(&f.path, new.end); // rewritten, or an older offsets format
+            }
             continue;
         }
         report.files_read += 1;
-        let entries: Vec<UsageEntry> = new
+        let candidates: Vec<UsageEntry> = new
             .lines
             .iter()
             .filter_map(|l| transcript::parse_line(l, f.subagent, &f.session_hint))
             .filter(|e| e.ts >= creds.logged_in_at)
-            .filter(|e| !quarantine.contains(&e.session_id))
-            .filter(|e| seen.insert(e.message_id.clone()))
+            .filter(|e| !quarantine.contains(&scope, &e.session_id))
             .collect();
-        if entries.is_empty() {
+        if candidates.is_empty() {
             offsets.set(&f.path, new.end); // nothing to upload from these bytes
-        } else {
-            pending.push((f.path.clone(), new.end, entries));
+            continue;
         }
+        let entries = candidates.into_iter().filter(|e| seen.insert(e.message_id.clone())).collect();
+        pending.push((f.path.clone(), new.end, entries));
     }
     offsets.save(&paths.offsets())?;
 
@@ -307,7 +435,12 @@ pub fn run(paths: &Paths, creds: &Credentials, client: &ApiClient, opts: &SyncOp
         .filter(|s| last_sent.is_none_or(|l| s.fetched_at > l))
         .cloned();
 
-    if pending.is_empty() && snapshot.is_none() {
+    if pending.iter().all(|(_, _, entries)| entries.is_empty()) && snapshot.is_none() {
+        // Nothing to upload, so nothing would notice a revoked token: check it
+        // (one cheap request) so the gate blocks before the next prompt.
+        if let Err(e @ ApiError::Unauthorized(_)) = client.me() {
+            return Err(fatal(paths, &creds.token, e));
+        }
         return Ok(report);
     }
 
@@ -328,70 +461,34 @@ pub fn run(paths: &Paths, creds: &Credentials, client: &ApiClient, opts: &SyncOp
             b.accounts.insert(account);
             b.entries.push(e);
         }
-        // A file's offset commits only with the batch holding its last entry.
+        // A file's offset commits only with the batch holding its last entry,
+        // or (all duplicates) the latest batch so far, which is at or after
+        // every batch holding the entries it duplicates.
         batches.last_mut().unwrap().completes.push((path, end));
     }
 
-    let device = Device { hostname: hostname(), os: std::env::consts::OS.to_string() };
-    for (i, batch) in batches.iter().enumerate() {
+    let mut up = Uploader {
+        paths,
+        creds,
+        client,
+        device: Device { hostname: hostname(), os: std::env::consts::OS.to_string() },
+        timeline: &timeline,
+        claude: &claude,
+        scope,
+        quarantine,
+        report,
+    };
+    for (i, batch) in batches.into_iter().enumerate() {
         let snap = if i == 0 { snapshot.as_ref() } else { None };
-        let req = build_request(&device, &batch.entries, &timeline, &claude, snap);
-        match client.ingest(&req) {
-            Ok(resp) => {
-                report.batches += 1;
-                report.entries_sent += batch.entries.len();
-                report.accepted += resp.accepted;
-                report.duplicates += resp.duplicates;
-            }
-            Err(e) => {
-                let Some(status) = deterministic(&e) else { return Err(fatal(paths, e)) };
-                // One bad session (e.g. HTTP 403: it belongs to another cctrack user
-                // after someone else logged in on this OS account) must not wedge
-                // every sync: retry per session and quarantine the ones still refused.
-                log(paths, &format!("ingest batch of {} entries rejected with HTTP {status} ({e}); retrying per session", batch.entries.len()));
-                let mut by_session: BTreeMap<&str, Vec<UsageEntry>> = BTreeMap::new();
-                for e in &batch.entries {
-                    by_session.entry(e.session_id.as_str()).or_default().push(e.clone());
-                }
-                for (session_id, entries) in by_session {
-                    let req = build_request(&device, &entries, &timeline, &claude, None);
-                    match client.ingest(&req) {
-                        Ok(resp) => {
-                            report.batches += 1;
-                            report.entries_sent += entries.len();
-                            report.accepted += resp.accepted;
-                            report.duplicates += resp.duplicates;
-                        }
-                        Err(e) => {
-                            let Some(status) = deterministic(&e) else { return Err(fatal(paths, e)) };
-                            let error = e.to_string();
-                            log(paths, &format!("quarantined session {session_id}: dropped {} entries, HTTP {status} ({error})", entries.len()));
-                            quarantine.0.insert(session_id.to_string(), QuarantinedSession { at: now, status, error });
-                            write_json_atomic(&paths.quarantine(), &quarantine, None)?;
-                            report.quarantined.push(session_id.to_string());
-                        }
-                    }
-                }
-                if let Some(s) = snap {
-                    let req = build_request(&device, &[], &timeline, &claude, Some(s));
-                    match client.ingest(&req) {
-                        Ok(_) => {}
-                        Err(e) => {
-                            let Some(status) = deterministic(&e) else { return Err(fatal(paths, e)) };
-                            log(paths, &format!("dropped limit snapshot captured at {}: HTTP {status} ({e})", s.fetched_at.to_rfc3339()));
-                        }
-                    }
-                }
-            }
-        }
+        up.send_batch(batch.entries, snap)?;
         // Every entry of this batch is now accepted or quarantined.
-        for (path, end) in &batch.completes {
-            offsets.set(path, *end);
+        for (path, end) in batch.completes {
+            offsets.set(&path, end);
         }
         offsets.save(&paths.offsets())?;
         if let Some(s) = snap {
             write_json_atomic(&paths.last_snapshot(), &s.fetched_at, None)?;
         }
     }
-    Ok(report)
+    Ok(up.report)
 }

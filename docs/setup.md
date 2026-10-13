@@ -45,8 +45,9 @@ Create a Neon project (or connect Neon through the Vercel marketplace). You need
 
    Removing someone from `ALLOWED_DOMAINS` / `ALLOWED_EMAILS` only stops new sign-ins; it
    does not end sessions they already have. Revoke their CLI tokens on the dashboard's
-   **Settings** page (that takes effect immediately); their browser session cookie expires
-   within 30 days.
+   **Settings** page: the server rejects the token at once, and their Claude Code is
+   blocked once the CLI next contacts the server (at every session start and after each
+   turn). Their browser session cookie expires within 30 days.
 4. Deploy, then open `PUBLIC_URL` and sign in.
 
 ## 4. Install the CLI (each developer)
@@ -56,7 +57,13 @@ git clone <this repo> && cd <repo>
 cargo install --path apps/cli
 cctrack login --server https://cctrack.example.com
 ```
-On a machine without a browser, use `cctrack login --paste`. Check with `cctrack status`.
+On a machine without a browser, sign in the first time with
+`cctrack login --server https://cctrack.example.com --paste` (afterwards `cctrack login --paste`
+is enough). Check with `cctrack status`.
+
+The plugin runs `cctrack` only from `~/.cargo/bin`, `/opt/homebrew/bin`, `/usr/local/bin` or
+`~/.local/bin` (never from an arbitrary `PATH` entry). If you installed it elsewhere, set
+`CCTRACK_BIN` to its full path in the environment Claude Code starts from.
 
 ## 5. Enable the Claude Code plugin (each developer)
 

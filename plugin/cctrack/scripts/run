@@ -20,18 +20,16 @@ block() {
   exit 2
 }
 
+# Never search PATH: a directory early on PATH (or a project-local one) could
+# hold any executable named cctrack. Only CCTRACK_BIN or fixed install dirs.
 bin="${CCTRACK_BIN:-}"
 if [ -z "$bin" ]; then
-  if command -v cctrack >/dev/null 2>&1; then
-    bin=$(command -v cctrack)
-  else
-    for candidate in "$HOME/.cargo/bin/cctrack" /opt/homebrew/bin/cctrack /usr/local/bin/cctrack "$HOME/.local/bin/cctrack"; do
-      if [ -x "$candidate" ]; then
-        bin="$candidate"
-        break
-      fi
-    done
-  fi
+  for candidate in "$HOME/.cargo/bin/cctrack" /opt/homebrew/bin/cctrack /usr/local/bin/cctrack "$HOME/.local/bin/cctrack"; do
+    if [ -x "$candidate" ]; then
+      bin="$candidate"
+      break
+    fi
+  done
 fi
 
 if [ -z "$bin" ] || [ ! -x "$bin" ]; then

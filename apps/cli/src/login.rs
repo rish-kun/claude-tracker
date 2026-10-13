@@ -12,7 +12,7 @@ use chrono::{DateTime, Utc};
 use reqwest::Url;
 use sha2::{Digest, Sha256};
 
-use crate::client::{ApiClient, ApiError};
+use crate::client::{ApiClient, ApiError, is_secure_server};
 use crate::credentials::{self, AuthState, Credentials};
 use crate::paths::Paths;
 use crate::sync::{self, SyncOptions, hostname};
@@ -37,16 +37,23 @@ pub fn random_state() -> String {
     b64(&rand::random::<[u8; 24]>())
 }
 
-/// Checks that `server` is an absolute http(s) URL with a host and returns it
-/// without trailing slashes. Catches values like `cctrack.example.com` (no
-/// scheme) and `localhost:3000` (parses as an opaque URL with scheme
-/// "localhost"), which would otherwise panic or produce an unusable link.
+/// Checks that `server` is an absolute https URL with a host (plain http
+/// only for localhost, 127.0.0.1 and ::1) and no query or fragment, and
+/// returns it without trailing slashes. Catches values like
+/// `cctrack.example.com` (no scheme) and `localhost:3000` (parses as an
+/// opaque URL with scheme "localhost"), which would otherwise panic or
+/// produce an unusable link.
 pub fn validate_server(server: &str) -> Result<String> {
-    let ok = Url::parse(server).is_ok_and(|u| {
+    let Some(url) = Url::parse(server).ok().filter(|u| {
         matches!(u.scheme(), "http" | "https") && !u.cannot_be_a_base() && u.host_str().is_some_and(|h| !h.is_empty())
-    });
-    if !ok {
+    }) else {
         bail!("invalid server URL '{server}': include the scheme, e.g. https://cctrack.example.com");
+    };
+    if url.query().is_some() || url.fragment().is_some() {
+        bail!("invalid server URL '{server}': remove the query (?…) or fragment (#…)");
+    }
+    if !is_secure_server(&url) {
+        bail!("invalid server URL '{server}': use https (plain http is only allowed for localhost, 127.0.0.1 and ::1)");
     }
     Ok(server.trim_end_matches('/').to_string())
 }
@@ -129,38 +136,51 @@ pub fn wait_for_callback(listener: &TcpListener, expected_state: &str, timeout: 
 }
 
 pub fn login(paths: &Paths, server: &str, paste: bool, now: DateTime<Utc>) -> Result<Credentials> {
+    login_with(paths, server, now, |server, state, challenge| {
+        if paste {
+            let url = start_url(server, None, state, challenge);
+            eprintln!("Open this URL in a browser and sign in with Google:\n\n  {url}\n");
+            eprint!("Paste the code shown after sign-in: ");
+            io::stderr().flush()?;
+            let mut line = String::new();
+            io::stdin().read_line(&mut line)?;
+            Ok(line.trim().to_string())
+        } else {
+            let listener = TcpListener::bind("127.0.0.1:0").context("bind loopback listener")?;
+            let port = listener.local_addr()?.port();
+            let url = start_url(server, Some(port), state, challenge);
+            eprintln!("Opening your browser to sign in with Google…\nIf it does not open, visit:\n\n  {url}\n");
+            let _ = open::that(&url);
+            wait_for_callback(&listener, state, Duration::from_secs(300))
+        }
+    })
+}
+
+/// The login flow with the sign-in step (`obtain_code(server, state,
+/// code_challenge)`) supplied by the caller.
+pub fn login_with(
+    paths: &Paths,
+    server: &str,
+    now: DateTime<Utc>,
+    obtain_code: impl FnOnce(&str, &str, &str) -> Result<String>,
+) -> Result<Credentials> {
     let server = validate_server(server)?;
     let server = server.as_str();
+    // Usage recorded so far may belong to a different user than the one about
+    // to sign in: upload it with the current token first. This runs before the
+    // sign-in and code exchange, so interrupting it can never leave a freshly
+    // minted token unsaved (and live) on the server.
+    if let AuthState::LoggedIn(old) = credentials::load(paths) {
+        best_effort_sync(paths, &old, "for the current login");
+    }
     let pk = pkce();
     let state = random_state();
-    let code = if paste {
-        let url = start_url(server, None, &state, &pk.challenge);
-        eprintln!("Open this URL in a browser and sign in with Google:\n\n  {url}\n");
-        eprint!("Paste the code shown after sign-in: ");
-        io::stderr().flush()?;
-        let mut line = String::new();
-        io::stdin().read_line(&mut line)?;
-        line.trim().to_string()
-    } else {
-        let listener = TcpListener::bind("127.0.0.1:0").context("bind loopback listener")?;
-        let port = listener.local_addr()?.port();
-        let url = start_url(server, Some(port), &state, &pk.challenge);
-        eprintln!("Opening your browser to sign in with Google…\nIf it does not open, visit:\n\n  {url}\n");
-        let _ = open::that(&url);
-        wait_for_callback(&listener, &state, Duration::from_secs(300))?
-    };
+    let code = obtain_code(server, &state, &pk.challenge)?;
     if code.is_empty() {
         bail!("no code entered");
     }
 
     let resp = ApiClient::new(server, None).exchange(&code, &pk.verifier, &hostname())?;
-    // Usage recorded so far belongs to the previous user: upload it with their
-    // token before their credentials are replaced.
-    if let AuthState::LoggedIn(old) = credentials::load(paths)
-        && (old.user.id != resp.user.id || old.server != server)
-    {
-        best_effort_sync(paths, &old, "for the previous login");
-    }
     // Keep the earlier start time when the same user logs in again, so usage
     // between the two logins that was never synced is not dropped.
     let logged_in_at = match credentials::load(paths) {
@@ -288,10 +308,91 @@ mod tests {
     }
 
     #[test]
-    fn validate_server_accepts_http_and_https() {
+    fn validate_server_accepts_https_and_loopback_http() {
         assert_eq!(validate_server("https://c.example.com").unwrap(), "https://c.example.com");
-        assert_eq!(validate_server("http://localhost:8080").unwrap(), "http://localhost:8080");
         assert_eq!(validate_server("https://c.example.com/").unwrap(), "https://c.example.com");
+        assert_eq!(validate_server("https://c.example.com/cctrack/").unwrap(), "https://c.example.com/cctrack");
+        assert_eq!(validate_server("http://localhost:8080").unwrap(), "http://localhost:8080");
+        assert_eq!(validate_server("http://127.0.0.1:8080").unwrap(), "http://127.0.0.1:8080");
+        assert_eq!(validate_server("http://[::1]:8080").unwrap(), "http://[::1]:8080");
+    }
+
+    #[test]
+    fn validate_server_rejects_plain_http_to_remote_hosts() {
+        for bad in ["http://c.example.com", "http://10.0.0.5:8080", "http://localhost.example.com", "http://127.0.0.2"] {
+            let err = validate_server(bad).unwrap_err().to_string();
+            assert!(err.contains("use https"), "{bad}: {err}");
+        }
+    }
+
+    #[test]
+    fn validate_server_rejects_query_and_fragment() {
+        for bad in ["https://c.example.com?x=1", "https://c.example.com/?", "https://c.example.com#frag", "https://c.example.com/#"] {
+            let err = validate_server(bad).unwrap_err().to_string();
+            assert!(err.contains("query") && err.contains("fragment"), "{bad}: {err}");
+        }
+    }
+
+    #[test]
+    fn login_syncs_previous_user_before_sign_in_and_exchange() {
+        use std::sync::{Arc, Mutex};
+        let mut server = mockito::Server::new();
+        let order: Arc<Mutex<Vec<&'static str>>> = Arc::default();
+        let (o1, o2) = (order.clone(), order.clone());
+        let ingest = server
+            .mock("POST", "/api/ingest")
+            .match_header("authorization", "Bearer cct_abc")
+            .with_body_from_request(move |_| {
+                o1.lock().unwrap().push("old-user-ingest");
+                br#"{"accepted":1,"duplicates":0}"#.to_vec()
+            })
+            .create();
+        let exchange = server
+            .mock("POST", "/api/auth/cli/exchange")
+            .with_body_from_request(move |_| {
+                o2.lock().unwrap().push("exchange");
+                br#"{"token":"cct_new","user":{"id":2,"email":"new@example.com","name":"New"}}"#.to_vec()
+            })
+            .create();
+
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::under(dir.path());
+        let old = Credentials {
+            server: server.url(),
+            token: "cct_abc".into(),
+            user: crate::credentials::UserInfo { id: 1, email: "dev@example.com".into(), name: "Dev".into() },
+            logged_in_at: "2026-10-01T00:00:00Z".parse().unwrap(),
+            invalid: false,
+        };
+        credentials::save(&paths, &old).unwrap();
+        let t = paths.projects_dir().join("-p/s1.jsonl");
+        std::fs::create_dir_all(t.parent().unwrap()).unwrap();
+        std::fs::write(&t, r#"{"type":"assistant","sessionId":"s1","timestamp":"2026-10-01T10:00:00Z","message":{"id":"m1","model":"claude-opus-5-5","usage":{"input_tokens":1,"output_tokens":1}}}"#.to_string() + "\n").unwrap();
+
+        let o3 = order.clone();
+        let creds = login_with(&paths, &server.url(), Utc::now(), |_, _, _| {
+            o3.lock().unwrap().push("sign-in");
+            Ok("code-1".into())
+        })
+        .unwrap();
+        assert_eq!(*order.lock().unwrap(), vec!["old-user-ingest", "sign-in", "exchange"]);
+        assert_eq!(creds.token, "cct_new");
+        match credentials::load(&paths) {
+            AuthState::LoggedIn(c) => assert_eq!((c.token.as_str(), c.user.id), ("cct_new", 2)),
+            other => panic!("{other:?}"),
+        }
+        ingest.assert();
+        exchange.assert();
+    }
+
+    #[test]
+    fn login_interrupted_during_sign_in_keeps_old_credentials() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::under(dir.path());
+        saved_creds(&paths, "http://127.0.0.1:9");
+        let err = login_with(&paths, "http://127.0.0.1:9", Utc::now(), |_, _, _| bail!("cancelled")).unwrap_err();
+        assert!(err.to_string().contains("cancelled"));
+        assert!(matches!(credentials::load(&paths), AuthState::LoggedIn(c) if c.token == "cct_abc"));
     }
 
     #[test]

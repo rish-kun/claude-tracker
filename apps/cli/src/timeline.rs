@@ -3,6 +3,7 @@
 //! account active at its timestamp rather than the account active at sync time.
 
 use std::path::Path;
+use std::time::Duration;
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
@@ -10,7 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::claude_json::{self, ClaudeState, OAuthAccount};
 use crate::paths::Paths;
-use crate::state::{read_json, write_json_atomic};
+use crate::state::{lock_file, read_json, write_json_atomic};
 
 const MAX_OBSERVATIONS: usize = 500;
 
@@ -62,6 +63,25 @@ impl Timeline {
     }
 }
 
+/// How long to wait for another process's timeline update before giving up.
+pub const LOCK_WAIT: Duration = Duration::from_secs(2);
+
+/// Records `account` as observed at `now` and returns the updated timeline.
+/// The load/observe/save runs under `<timeline>.lock` so concurrent hooks and
+/// syncs cannot drop each other's observations. If the lock is not acquired
+/// within [`LOCK_WAIT`] nothing is recorded and the stored timeline is returned.
+pub fn record(paths: &Paths, now: DateTime<Utc>, account: Option<OAuthAccount>) -> Timeline {
+    let path = paths.timeline();
+    let Ok(Some(_lock)) = lock_file(&paths.timeline_lock(), LOCK_WAIT) else {
+        return Timeline::load(&path);
+    };
+    let mut t = Timeline::load(&path);
+    if t.observe(now, account) {
+        let _ = t.save(&path);
+    }
+    t
+}
+
 /// Reads the current account from ~/.claude.json and records it. A missing or
 /// unparseable file (e.g. a torn read mid-rewrite) records nothing and yields
 /// the default state.
@@ -69,10 +89,7 @@ pub fn observe_current(paths: &Paths, now: DateTime<Utc>) -> ClaudeState {
     let Some(state) = claude_json::read_checked(&paths.claude_json) else {
         return ClaudeState::default();
     };
-    let mut t = Timeline::load(&paths.timeline());
-    if t.observe(now, state.account.clone()) {
-        let _ = t.save(&paths.timeline());
-    }
+    record(paths, now, state.account.clone());
     state
 }
 
@@ -127,6 +144,38 @@ mod tests {
         t.observe(at(9), acct("A"));
         t.save(&p).unwrap();
         assert_eq!(Timeline::load(&p).observations, t.observations);
+    }
+
+    #[test]
+    fn concurrent_records_keep_every_observation() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::under(dir.path());
+        let threads: Vec<_> = (0..8)
+            .map(|i| {
+                let p = paths.clone();
+                std::thread::spawn(move || {
+                    // Distinct accounts and times, so every record must persist.
+                    record(&p, at(0) + chrono::Duration::minutes(i), acct(&format!("acct-{i}")));
+                })
+            })
+            .collect();
+        for t in threads {
+            t.join().unwrap();
+        }
+        assert_eq!(Timeline::load(&paths.timeline()).observations.len(), 8);
+    }
+
+    #[test]
+    fn record_skips_when_lock_is_held() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::under(dir.path());
+        record(&paths, at(9), acct("A"));
+        let _held = lock_file(&paths.timeline_lock(), Duration::ZERO).unwrap().unwrap();
+        let start = std::time::Instant::now();
+        let t = record(&paths, at(10), acct("B"));
+        assert!(start.elapsed() >= LOCK_WAIT && start.elapsed() < LOCK_WAIT + Duration::from_secs(2));
+        assert_eq!(t.observations.len(), 1, "returns the stored timeline");
+        assert_eq!(Timeline::load(&paths.timeline()).observations.len(), 1, "nothing recorded without the lock");
     }
 
     #[test]

@@ -5,9 +5,11 @@ description: Use at the start of every session, whenever a message mentions cctr
 
 # cctrack — usage tracking
 
-This team tracks Claude Code plan usage with the `cctrack` CLI. Hooks upload token
-counts automatically; your jobs are to respect the login gate and to attach a
-short summary of the work you did. The plugin requires Claude Code 2.1.295+.
+This team tracks Claude Code plan usage with the `cctrack` CLI. Token usage is
+uploaded **automatically** by the plugin's hooks (after every turn and when the
+session ends); you never need to upload usage yourself. Your jobs are to respect
+the login gate and, after meaningful work, to attach a short summary. The plugin
+requires Claude Code 2.1.295+.
 
 ## 1. The login gate (mandatory)
 
@@ -28,14 +30,21 @@ If the session context, a blocked prompt, or a denied tool says cctrack is
   5 minutes for the user, and `--paste` needs a terminal. Never pass `--server`;
   only the user chooses the server.
 - You may run `cctrack status` or `cctrack whoami` to check whether the user has
-  signed in.
+  signed in. Use the exact command shown in the cctrack message (it names the
+  full path of the cctrack binary); any other spelling is denied.
 - If `cctrack` is not installed, tell the user to install it
   (`cargo install --path apps/cli` from the cctrack repo) and stop.
 
-## 2. Upload a summary after meaningful work
+An admin can revoke a login from the dashboard. That takes effect the next time
+the CLI contacts the server — at the next session start, or after the next turn —
+and from then on the gate above applies.
 
-When you have finished a meaningful unit of work (a feature, fix, investigation,
-or review — not trivial Q&A), and before you end a session in which work was done:
+## 2. Attach a summary after meaningful work
+
+Usage is already uploaded without you; the summary is optional, but expected
+after meaningful work. When you have finished a meaningful unit of work (a
+feature, fix, investigation, or review — not trivial Q&A), and before you end a
+session in which work was done:
 
 1. Write yourself a few bullet notes of what was accomplished.
 2. Dispatch a subagent with **model `haiku`** and this prompt:
@@ -55,4 +64,5 @@ or review — not trivial Q&A), and before you end a session in which work was d
 
 - `cctrack status` — local, instant: login state and detected Claude account.
 - `cctrack whoami` — checks the token with the server.
-- `cctrack sync` — manual upload of any pending usage (hooks normally do this).
+- `cctrack sync` — forces an upload of any pending usage now (the hooks do this
+  automatically after every turn and at session end).
