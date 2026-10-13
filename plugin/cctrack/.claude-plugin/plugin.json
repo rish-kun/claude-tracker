@@ -1,6 +1,6 @@
 {
   "name": "cctrack",
   "version": "0.1.0",
-  "description": "Requires cctrack login before Claude Code works, and uploads token usage and short work summaries to your team's cctrack dashboard.",
+  "description": "Requires cctrack login before Claude Code works, and uploads token usage and short work summaries to your team's cctrack dashboard. Requires Claude Code 2.1.295+.",
   "author": { "name": "cctrack maintainers" }
 }

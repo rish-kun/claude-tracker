@@ -4,10 +4,10 @@
       { "hooks": [{ "type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/run\" hook session-start", "timeout": 10 }] }
     ],
     "UserPromptSubmit": [
-      { "hooks": [{ "type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/run\" hook user-prompt-submit", "timeout": 10 }] }
+      { "hooks": [{ "type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/run\" hook user-prompt-submit", "timeout": 10, "onFailure": "block" }] }
     ],
     "PreToolUse": [
-      { "matcher": "*", "hooks": [{ "type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/run\" hook pre-tool-use", "timeout": 10 }] }
+      { "matcher": "*", "hooks": [{ "type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/run\" hook pre-tool-use", "timeout": 10, "onFailure": "block" }] }
     ],
     "Stop": [
       { "hooks": [{ "type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/run\" hook stop", "timeout": 10 }] }

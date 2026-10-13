@@ -48,8 +48,19 @@ pub struct Outcome {
     pub sync: Option<SyncSpawn>,
 }
 
-const LOGIN_HELP: &str = "Run `cctrack login` in a terminal (or type `! cctrack login` in Claude Code)";
 const ALLOWED_SUBCOMMANDS: [&str; 3] = ["login", "status", "whoami"];
+
+/// How to log in. With no stored credentials the server is unknown, so the
+/// user must name it (the agent itself may never pass `--server`).
+fn login_help(gate: &Gate) -> &'static str {
+    match gate {
+        Gate::LoggedOut => {
+            "Run `cctrack login --server <your-cctrack-url>` in a terminal \
+             (or type `! cctrack login --server <your-cctrack-url>` in Claude Code)"
+        }
+        _ => "Run `cctrack login` in a terminal (or type `! cctrack login` in Claude Code)",
+    }
+}
 
 fn login_problem(gate: &Gate) -> &'static str {
     match gate {
@@ -59,7 +70,7 @@ fn login_problem(gate: &Gate) -> &'static str {
 }
 
 fn blocked_reason(gate: &Gate) -> String {
-    format!("cctrack: {}. {LOGIN_HELP}, then try again.", login_problem(gate))
+    format!("cctrack: {}. {}, then try again.", login_problem(gate), login_help(gate))
 }
 
 /// True for a single, unchained `cctrack login|status|whoami …` command that
@@ -92,12 +103,14 @@ pub fn decide(event: HookEvent, input: &HookInput, gate: &Gate) -> Outcome {
                 Gate::LoggedIn { email } => format!(
                     "cctrack: logged in as {email}. Claude Code session id: {session}. \
                      When you finish a meaningful piece of work, follow the cctrack skill to upload a 1-2 line summary \
-                     with `cctrack upload --session {session} --summary \"...\"`."
+                     with `cctrack upload --session {session} --summary '...'` (single quotes; remove any ' from the summary)."
                 ),
                 _ => format!(
-                    "cctrack: NOT LOGGED IN ({}). Do not start any work in this session. {LOGIN_HELP}. \
-                     Until then every tool except `cctrack login`, `cctrack status` and `cctrack whoami` is blocked.",
-                    login_problem(gate)
+                    "cctrack: NOT LOGGED IN ({}). Do not start any work in this session. {}. \
+                     Until then every tool except `cctrack login`, `cctrack status` and `cctrack whoami` is blocked. \
+                     Claude Code session id: {session}.",
+                    login_problem(gate),
+                    login_help(gate)
                 ),
             };
             Outcome {
@@ -214,9 +227,11 @@ mod tests {
         let out = decide(HookEvent::UserPromptSubmit, &HookInput::default(), &Gate::LoggedOut);
         let v = out.stdout.unwrap();
         assert_eq!(v["decision"], "block");
-        assert!(v["reason"].as_str().unwrap().contains("cctrack login"));
+        // No stored credentials: the server is unknown, so first-login help names --server.
+        assert!(v["reason"].as_str().unwrap().contains("cctrack login --server <your-cctrack-url>"), "{v}");
         let v = decide(HookEvent::UserPromptSubmit, &HookInput::default(), &Gate::Revoked).stdout.unwrap();
-        assert!(v["reason"].as_str().unwrap().contains("revoked"));
+        let reason = v["reason"].as_str().unwrap();
+        assert!(reason.contains("revoked") && reason.contains("`cctrack login`") && !reason.contains("--server"), "{reason}");
         assert_eq!(decide(HookEvent::UserPromptSubmit, &HookInput::default(), &logged_in()), Outcome::default());
     }
 
@@ -225,6 +240,11 @@ mod tests {
         let deny = decide(HookEvent::PreToolUse, &bash("ls"), &Gate::LoggedOut).stdout.unwrap();
         assert_eq!(deny["hookSpecificOutput"]["hookEventName"], "PreToolUse");
         assert_eq!(deny["hookSpecificOutput"]["permissionDecision"], "deny");
+        let reason = deny["hookSpecificOutput"]["permissionDecisionReason"].as_str().unwrap();
+        assert!(reason.contains("cctrack login --server <your-cctrack-url>"), "{reason}");
+        let deny = decide(HookEvent::PreToolUse, &bash("ls"), &Gate::Revoked).stdout.unwrap();
+        let reason = deny["hookSpecificOutput"]["permissionDecisionReason"].as_str().unwrap();
+        assert!(reason.contains("`cctrack login`") && !reason.contains("--server"), "{reason}");
         let edit = HookInput { tool_name: Some("Edit".into()), ..Default::default() };
         assert!(decide(HookEvent::PreToolUse, &edit, &Gate::LoggedOut).stdout.is_some());
         assert_eq!(decide(HookEvent::PreToolUse, &bash("cctrack login"), &Gate::LoggedOut), Outcome::default());
@@ -237,11 +257,16 @@ mod tests {
         let out = decide(HookEvent::SessionStart, &input, &logged_in());
         let ctx = out.stdout.unwrap()["hookSpecificOutput"]["additionalContext"].as_str().unwrap().to_string();
         assert!(ctx.contains("sess-9") && ctx.contains("dev@example.com"));
+        // Summaries go in single quotes so backticks/$ in them are never executed.
+        assert!(ctx.contains("--summary '") && !ctx.contains("--summary \""), "{ctx}");
         assert_eq!(out.sync, Some(SyncSpawn::Sweep));
 
         let out = decide(HookEvent::SessionStart, &input, &Gate::LoggedOut);
         let ctx = out.stdout.unwrap()["hookSpecificOutput"]["additionalContext"].as_str().unwrap().to_string();
         assert!(ctx.contains("NOT LOGGED IN") && ctx.contains("Do not start"));
+        // The session id is needed later if the user logs in mid-session.
+        assert!(ctx.contains("Claude Code session id: sess-9"), "{ctx}");
+        assert!(ctx.contains("cctrack login --server <your-cctrack-url>"), "{ctx}");
         assert!(!ctx.contains(".."), "{ctx}");
         assert_eq!(ctx.matches("cctrack:").count(), 1, "{ctx}");
         assert_eq!(out.sync, None);
@@ -249,6 +274,7 @@ mod tests {
         let out = decide(HookEvent::SessionStart, &input, &Gate::Revoked);
         let ctx = out.stdout.unwrap()["hookSpecificOutput"]["additionalContext"].as_str().unwrap().to_string();
         assert!(ctx.contains("NOT LOGGED IN") && ctx.contains("revoked") && !ctx.contains(".."), "{ctx}");
+        assert!(ctx.contains("Claude Code session id: sess-9") && !ctx.contains("--server"), "{ctx}");
         assert_eq!(ctx.matches("cctrack:").count(), 1, "{ctx}");
         assert_eq!(out.sync, None);
     }
