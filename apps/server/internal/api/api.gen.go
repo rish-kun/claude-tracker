@@ -174,7 +174,7 @@ type Health struct {
 	Status string `json:"status"`
 }
 
-// IngestAccount A Claude account seen on the device. account_uuid "api_key" means API-key auth; the server maps it to a per-user, per-device synthetic account.
+// IngestAccount A Claude account seen on the device. account_uuid "api_key" means API-key auth; the server maps it to a per-user, per-device synthetic account. account_uuid must not start with "api_key:" (reserved for those synthetic accounts).
 type IngestAccount struct {
 	AccountUuid   string  `json:"account_uuid"`
 	Email         *string `json:"email,omitempty"`
@@ -183,7 +183,7 @@ type IngestAccount struct {
 	RateLimitTier *string `json:"rate_limit_tier,omitempty"`
 }
 
-// IngestEntry defines model for IngestEntry.
+// IngestEntry Every required key must be present (not null). Each token count must be within 0-50,000,000, and input + cache_write_5m + cache_write_1h + cache_read must not exceed 100,000,000. Strings must not contain NUL characters.
 type IngestEntry struct {
 	AccountUuid  string    `json:"account_uuid"`
 	CacheRead    int64     `json:"cache_read"`
@@ -296,6 +296,9 @@ type SeriesPoint struct {
 	Key         string `json:"key"`
 	Label       string `json:"label"`
 	TotalTokens int64  `json:"total_tokens"`
+
+	// UnpricedTokens Tokens in this point whose model has no price (excluded from cost_usd).
+	UnpricedTokens int64 `json:"unpriced_tokens"`
 }
 
 // Session defines model for Session.
@@ -398,6 +401,12 @@ type AdminByLoginParams struct {
 	Tz   *Tz  `form:"tz,omitempty" json:"tz,omitempty"`
 }
 
+// AdminPutPriceParams defines parameters for AdminPutPrice.
+type AdminPutPriceParams struct {
+	// Create When true, only create a new price; 409 if the normalised model is already priced.
+	Create *bool `form:"create,omitempty" json:"create,omitempty"`
+}
+
 // AdminListUserSessionsParams defines parameters for AdminListUserSessions.
 type AdminListUserSessionsParams struct {
 	Limit  *Limit  `form:"limit,omitempty" json:"limit,omitempty"`
@@ -469,7 +478,7 @@ type ServerInterface interface {
 	AdminListPrices(w http.ResponseWriter, r *http.Request)
 
 	// (PUT /admin/prices/{model})
-	AdminPutPrice(w http.ResponseWriter, r *http.Request, model string)
+	AdminPutPrice(w http.ResponseWriter, r *http.Request, model string, params AdminPutPriceParams)
 
 	// (GET /admin/tokens)
 	AdminListTokens(w http.ResponseWriter, r *http.Request)
@@ -716,8 +725,24 @@ func (siw *ServerInterfaceWrapper) AdminPutPrice(w http.ResponseWriter, r *http.
 		return
 	}
 
+	// Parameter object where we will unmarshal all parameters from the context
+	var params AdminPutPriceParams
+
+	// ------------- Optional query parameter "create" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "create", r.URL.Query(), &params.Create, runtime.BindQueryParameterOptions{Type: "boolean", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "create"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "create", Err: err})
+		}
+		return
+	}
+
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		siw.Handler.AdminPutPrice(w, r, model)
+		siw.Handler.AdminPutPrice(w, r, model, params)
 	}))
 
 	for _, middleware := range siw.HandlerMiddlewares {

@@ -27,12 +27,14 @@ paths:
       responses:
         "302": { description: Redirect to Google }
         "400": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
 
   /auth/web/start:
     get:
       operationId: webStart
       responses:
         "302": { description: Redirect to Google }
+        "503": { $ref: "#/components/responses/Error" }
 
   /auth/google/callback:
     get:
@@ -106,7 +108,13 @@ paths:
               schema: { $ref: "#/components/schemas/IngestResponse" }
         "400": { $ref: "#/components/responses/Error" }
         "401": { $ref: "#/components/responses/Error" }
-        "403": { $ref: "#/components/responses/Error" }
+        "403":
+          description: >
+            A session in the batch belongs to another user, or the request used a
+            browser session instead of a CLI bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
   /sessions/{sessionId}/summary:
     post:
@@ -123,6 +131,7 @@ paths:
         "204": { description: Saved }
         "400": { $ref: "#/components/responses/Error" }
         "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
 
   /me/usage:
@@ -293,6 +302,11 @@ paths:
       security: [{ cookie: [] }]
       parameters:
         - { name: model, in: path, required: true, schema: { type: string } }
+        - name: create
+          in: query
+          required: false
+          description: When true, only create a new price; 409 if the normalised model is already priced.
+          schema: { type: boolean }
       requestBody:
         required: true
         content:
@@ -306,6 +320,7 @@ paths:
               schema: { $ref: "#/components/schemas/ModelPrice" }
         "400": { $ref: "#/components/responses/Error" }
         "403": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
 
 components:
   securitySchemes:
@@ -389,7 +404,8 @@ components:
       type: object
       description: >
         A Claude account seen on the device. account_uuid "api_key" means API-key auth;
-        the server maps it to a per-user, per-device synthetic account.
+        the server maps it to a per-user, per-device synthetic account. account_uuid must
+        not start with "api_key:" (reserved for those synthetic accounts).
       required: [account_uuid]
       properties:
         account_uuid: { type: string }
@@ -410,6 +426,10 @@ components:
 
     IngestEntry:
       type: object
+      description: >
+        Every required key must be present (not null). Each token count must be within
+        0-50,000,000, and input + cache_write_5m + cache_write_1h + cache_read must not
+        exceed 100,000,000. Strings must not contain NUL characters.
       required: [session_id, account_uuid, message_id, model, ts, input, output, cache_write_5m, cache_write_1h, cache_read, is_subagent]
       properties:
         session_id: { type: string }
@@ -483,13 +503,17 @@ components:
 
     SeriesPoint:
       type: object
-      required: [date, key, label, total_tokens, cost_usd]
+      required: [date, key, label, total_tokens, cost_usd, unpriced_tokens]
       properties:
         date: { type: string, description: "YYYY-MM-DD in the requested tz" }
         key: { type: string }
         label: { type: string }
         total_tokens: { type: integer, format: int64 }
         cost_usd: { type: number, format: double }
+        unpriced_tokens:
+          type: integer
+          format: int64
+          description: Tokens in this point whose model has no price (excluded from cost_usd).
 
     Plan:
       type: string

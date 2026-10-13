@@ -379,7 +379,7 @@ func priceFromBody(model string, body api.PriceRates) (pricing.Price, string) {
 	return p, ""
 }
 
-func (s *Server) AdminPutPrice(w http.ResponseWriter, r *http.Request, model string) {
+func (s *Server) AdminPutPrice(w http.ResponseWriter, r *http.Request, model string, params api.AdminPutPriceParams) {
 	if _, ok := s.requireAdmin(w, r); !ok {
 		return
 	}
@@ -392,7 +392,15 @@ func (s *Server) AdminPutPrice(w http.ResponseWriter, r *http.Request, model str
 		writeError(w, http.StatusBadRequest, msg)
 		return
 	}
-	saved, err := s.store.UpsertPrice(r.Context(), p)
+	save := s.store.UpsertPrice
+	if params.Create != nil && *params.Create {
+		save = s.store.CreatePrice
+	}
+	saved, err := save(r.Context(), p)
+	if errors.Is(err, store.ErrConflict) {
+		writeError(w, http.StatusConflict, "model already priced: "+p.Model)
+		return
+	}
 	if err != nil {
 		s.internal(w, err)
 		return
