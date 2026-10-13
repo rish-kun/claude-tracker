@@ -1,4 +1,5 @@
 import type { PriceRates } from '../api/client'
+import { type Draft, draftConflict, draftDirty, type DraftOps, startDraft, syncDraft } from './drafts'
 
 export type BaseRateKey = 'input' | 'cache_write_5m' | 'cache_write_1h' | 'cache_read' | 'output'
 
@@ -67,32 +68,39 @@ export function baseRatesEqual(a: PriceRates, b: PriceRates): boolean {
 }
 
 /** An editable price row: the typed draft and the server rates it was started from. */
-export interface RowDraft {
-  draft: RateDraft
-  base: PriceRates
+export type RowDraft = Draft<RateDraft, PriceRates>
+
+const priceOps: DraftOps<RateDraft, PriceRates> = {
+  fromServer: draftFromRates,
+  sameServer: baseRatesEqual,
+  matches: (d, r) => !draftChanged(d, r),
 }
 
 export function rowDraft(r: PriceRates): RowDraft {
-  return { draft: draftFromRates(r), base: r }
+  return startDraft(priceOps, r)
 }
 
 /** Whether the user has edited the draft away from the rates it was started from. */
 export function rowDirty(s: RowDraft): boolean {
-  return draftChanged(s.draft, s.base)
+  return draftDirty(priceOps, s)
 }
 
-/**
- * Reconciles a row with the latest server rates. A pristine draft (or one already typed to
- * exactly the new values) follows the server; any other dirty draft is kept as typed
- * (returned unchanged) so `rowConflict` can flag it instead of a save silently overwriting
- * the newer value. Returns `s` itself when nothing changes.
- */
+/** Reconciles a row with the latest server rates; see `syncDraft`. */
 export function syncRowDraft(s: RowDraft, server: PriceRates): RowDraft {
-  if (baseRatesEqual(s.base, server)) return s
-  return rowDirty(s) && draftChanged(s.draft, server) ? s : rowDraft(server)
+  return syncDraft(priceOps, s, server)
 }
 
 /** The server's base rates changed underneath an edited draft. */
 export function rowConflict(s: RowDraft, server: PriceRates): boolean {
-  return !baseRatesEqual(s.base, server)
+  return draftConflict(priceOps, s, server)
+}
+
+/**
+ * Error text for the Add-price row. A 409 means the normalised model is already priced
+ * (server message "model already priced: <normalised>"); nothing was written.
+ */
+export function addPriceError(err: { status?: number; message: string }): string {
+  if (err.status !== 409) return err.message
+  const model = /already priced:\s*(.+)$/.exec(err.message)?.[1]?.trim()
+  return `${model ? `${model} is ` : ''}already priced — edit its row instead.`
 }

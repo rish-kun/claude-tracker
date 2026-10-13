@@ -24,7 +24,7 @@ export function MyUsagePage() {
           <section className="card">
             <h2>Daily estimated cost by model</h2>
             <StackedDaily
-              pivot={markUnpriced(pivot(usage.data.daily_by_model, datesBetween(range), 'cost_usd'), usage.data.by_model)}
+              pivot={markUnpriced(pivot(usage.data.daily_by_model, datesBetween(range), 'cost_usd'))}
               format={formatUSD}
             />
             {usage.data.totals.unpriced_tokens > 0 && (

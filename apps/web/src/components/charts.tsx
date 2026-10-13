@@ -4,9 +4,9 @@ import {
   ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis,
 } from 'recharts'
 import type { LimitSnapshot } from '../api/client'
-import { formatDateTime } from '../lib/format'
+import { cellCost, formatDateTime } from '../lib/format'
 import { formatTimeTick, limitTimeline } from '../lib/limits'
-import type { Pivot, PivotKey } from '../lib/pivot'
+import { type Pivot, type PivotKey, unpricedAt } from '../lib/pivot'
 
 export const COLORS = ['#6366f1', '#f59e0b', '#10b981', '#ef4444', '#06b6d4', '#a855f7', '#84cc16', '#f97316', '#ec4899', '#14b8a6']
 const color = (i: number) => COLORS[i % COLORS.length]
@@ -15,14 +15,28 @@ export function Empty({ children = 'No usage in this range.' }: { children?: Rea
   return <div className="empty">{children}</div>
 }
 
+/**
+ * Tooltip formatter for a cost cell: `category` names the row field identifying the cell's
+ * row (e.g. "date"), and `unpriced(row, key)` gives that cell's unpriced tokens.
+ */
+function cellFormatter(format: (n: number) => string, category: string, unpriced: (row: string, key: string) => number) {
+  return (v: unknown, _name: unknown, item: { dataKey?: unknown; payload?: unknown }) => {
+    const row = String((item.payload as Record<string, unknown> | undefined)?.[category] ?? '')
+    return cellCost(Number(v), unpriced(row, String(item.dataKey ?? '')), format)
+  }
+}
+
 export function StackedDaily({ pivot, format, kind = 'area' }: { pivot: Pivot; format: (n: number) => string; kind?: 'area' | 'bar' }) {
   if (pivot.keys.length === 0) return <Empty />
+  // Each tooltip line is one series on one date; for a cost pivot, say how much of it is
+  // unpriced instead of letting a cost of 0 read as "$0.00".
+  const cell = cellFormatter(format, 'date', (date, key) => unpricedAt(pivot, date, key))
   const common = (
     <>
       <CartesianGrid strokeDasharray="3 3" vertical={false} />
       <XAxis dataKey="date" fontSize={12} />
       <YAxis tickFormatter={format} width={70} fontSize={12} />
-      <Tooltip formatter={(v) => format(Number(v))} />
+      <Tooltip formatter={cell} />
       <Legend />
     </>
   )
@@ -64,16 +78,30 @@ export function ShareDonut({ data, format }: { data: { name: string; value: numb
   )
 }
 
-/** Horizontal stacked bars: one bar per row (e.g. user), one segment per key (e.g. account). */
-export function UserAccountBars({ rows, keys, format }: { rows: Array<Record<string, string | number>>; keys: PivotKey[]; format: (n: number) => string }) {
+/**
+ * Horizontal stacked bars: one bar per row (e.g. user), one segment per key (e.g. account).
+ * `unpriced` (row name -> key -> tokens) makes cost tooltips flag unpriced usage.
+ */
+export function UserAccountBars({
+  rows,
+  keys,
+  format,
+  unpriced = {},
+}: {
+  rows: Array<Record<string, string | number>>
+  keys: PivotKey[]
+  format: (n: number) => string
+  unpriced?: Record<string, Record<string, number>>
+}) {
   if (rows.length === 0) return <Empty />
+  const cell = cellFormatter(format, 'name', (name, key) => unpriced[name]?.[key] ?? 0)
   return (
     <ResponsiveContainer width="100%" height={Math.max(120, rows.length * 44 + 60)}>
       <BarChart data={rows} layout="vertical" margin={{ left: 20 }}>
         <CartesianGrid strokeDasharray="3 3" horizontal={false} />
         <XAxis type="number" tickFormatter={format} fontSize={12} />
         <YAxis type="category" dataKey="name" width={180} fontSize={12} />
-        <Tooltip formatter={(v) => format(Number(v))} />
+        <Tooltip formatter={cell} />
         <Legend />
         {keys.map((k, i) => (
           <Bar key={k.key} dataKey={k.key} name={k.label} stackId="1" fill={color(i)} />

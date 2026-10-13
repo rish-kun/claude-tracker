@@ -27,7 +27,7 @@ export interface LimitTimelineData {
  * Chart data for the plan-limit timeline on a numeric time axis: points in capture order,
  * plus one marker per distinct window reset that falls within the captured span. Reset
  * times are rounded to the minute so second-level jitter between snapshots of the same
- * window doesn't draw duplicate lines.
+ * window doesn't draw duplicate lines. Markers are thinned by `selectResetMarkers`.
  */
 export function limitTimeline(limits: LimitSnapshot[]): LimitTimelineData {
   const points = limits
@@ -49,8 +49,27 @@ export function limitTimeline(limits: LimitSnapshot[]): LimitTimelineData {
   }
   add('5h reset', (l) => l.five_hour_resets_at)
   add('7d reset', (l) => l.seven_day_resets_at)
-  resets.sort((a, b) => a.t - b.t)
-  return { points, domain, resets }
+  return { points, domain, resets: selectResetMarkers(resets, domain) }
+}
+
+/** 5-hour reset markers are only drawn when the visible domain spans at most this long. */
+export const FIVE_HOUR_MARKER_MAX_SPAN_MS = 3 * DAY_MS
+/** At most this many markers per series (the latest ones). */
+export const MAX_MARKERS_PER_SERIES = 30
+
+/**
+ * Which reset markers to draw, so long ranges don't fill with hundreds of lines: 7-day
+ * resets always; 5-hour resets only when the domain spans ≤ 3 days; and at most the
+ * latest `max` markers per series. Returned in time order.
+ */
+export function selectResetMarkers(resets: ResetMarker[], domain: [number, number], max = MAX_MARKERS_PER_SERIES): ResetMarker[] {
+  const showFive = domain[1] - domain[0] <= FIVE_HOUR_MARKER_MAX_SPAN_MS
+  const latest = (label: ResetMarker['label']) =>
+    resets
+      .filter((r) => r.label === label)
+      .sort((a, b) => a.t - b.t)
+      .slice(-max)
+  return [...(showFive ? latest('5h reset') : []), ...latest('7d reset')].sort((a, b) => a.t - b.t)
 }
 
 /** Axis tick text: time of day for spans up to two days, otherwise the date. */
