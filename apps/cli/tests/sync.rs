@@ -379,8 +379,11 @@ fn deterministic_rejection_quarantines_only_the_offending_session() {
     assert!(offsets.get(&fx.transcript).offset > 0);
 
     let q = sync::Quarantine::load(&fx.paths.quarantine());
-    assert!(q.contains("bad") && !q.contains("sess-1"));
-    assert_eq!(q.0["bad"].status, 403);
+    let scope = sync::Quarantine::scope(&fx.creds);
+    assert_eq!(scope, "http://unused|1");
+    assert!(q.contains(&scope, "bad") && !q.contains(&scope, "sess-1"));
+    let raw: Value = serde_json::from_str(&fs::read_to_string(fx.paths.quarantine()).unwrap()).unwrap();
+    assert_eq!(raw, serde_json::json!({ "http://unused|1": ["bad"] }));
     let log = fs::read_to_string(fx.paths.sync_log()).unwrap();
     assert!(log.contains("quarantined session bad") && log.contains("HTTP 403"), "{log}");
 
@@ -444,5 +447,284 @@ fn same_size_rewrite_is_uploaded_again() {
     let report = sync::run(&fx.paths, &fx.creds, &client, &opts(), now()).unwrap();
     assert_eq!(report.entries_sent, 1);
     assert_eq!(bodies.lock().unwrap()[1]["entries"][0]["message_id"], "rw_b");
+    mock.assert();
+}
+
+// ---- I1: revocation is noticed even with nothing to upload ----
+
+/// Runs a first sync that uploads everything, so the next has nothing pending.
+fn drained(fx: &Fixture) {
+    let (server, _mock, _) = recording_server(1);
+    let client = ApiClient::new(&server.url(), Some("cct_test"));
+    sync::run(&fx.paths, &fx.creds, &client, &opts(), now()).unwrap();
+}
+
+#[test]
+fn nothing_pending_checks_the_token_and_marks_a_revoked_one_invalid() {
+    let fx = fixture();
+    drained(&fx);
+    let mut server = mockito::Server::new();
+    let ingest = server.mock("POST", "/api/ingest").expect(0).create();
+    let me = server.mock("GET", "/api/me").match_header("authorization", "Bearer cct_test").with_status(401).with_body(r#"{"error":"revoked"}"#).expect(1).create();
+    let client = ApiClient::new(&server.url(), Some("cct_test"));
+    let err = sync::run(&fx.paths, &fx.creds, &client, &opts(), now()).unwrap_err();
+    assert!(err.to_string().contains("401"), "{err}");
+    assert!(matches!(credentials::load(&fx.paths), AuthState::Invalid(_)));
+    ingest.assert();
+    me.assert();
+}
+
+#[test]
+fn nothing_pending_with_a_valid_token_or_offline_is_ok() {
+    let fx = fixture();
+    drained(&fx);
+    let mut server = mockito::Server::new();
+    let me = server.mock("GET", "/api/me").with_body(r#"{"id":1,"email":"dev@example.com","name":"Dev","is_admin":false}"#).expect(1).create();
+    let client = ApiClient::new(&server.url(), Some("cct_test"));
+    assert_eq!(sync::run(&fx.paths, &fx.creds, &client, &opts(), now()).unwrap().entries_sent, 0);
+    me.assert();
+    // Offline: no error, still logged in.
+    let offline = ApiClient::new("http://127.0.0.1:9", Some("cct_test"));
+    assert!(sync::run(&fx.paths, &fx.creds, &offline, &opts(), now()).is_ok());
+    assert!(matches!(credentials::load(&fx.paths), AuthState::LoggedIn(_)));
+}
+
+#[test]
+fn no_token_check_when_a_batch_was_sent() {
+    let fx = fixture();
+    let (mut server, mock, _) = recording_server(1);
+    let me = server.mock("GET", "/api/me").expect(0).create();
+    let client = ApiClient::new(&server.url(), Some("cct_test"));
+    sync::run(&fx.paths, &fx.creds, &client, &opts(), now()).unwrap();
+    mock.assert();
+    me.assert();
+}
+
+// ---- I2: byte cap and 413 ----
+
+/// A transcript of `n` entries in session `session` whose message ids are `pad` bytes long.
+fn big_file(fx: &Fixture, name: &str, session: &str, n: usize, pad: usize) -> std::path::PathBuf {
+    let f = fx.paths.projects_dir().join(format!("-home-dev-big/{name}.jsonl"));
+    fs::create_dir_all(f.parent().unwrap()).unwrap();
+    let lines: Vec<String> = (0..n).map(|i| line(session, &format!("{i:05}-{}", "x".repeat(pad)), "2026-10-01T10:00:00Z")).collect();
+    fs::write(&f, lines.join("\n") + "\n").unwrap();
+    f
+}
+
+#[test]
+fn batches_stay_under_the_byte_cap() {
+    let fx = fixture();
+    // ~1.5 KB per entry: 1000 entries fit the count limit but not 900 KB.
+    let f = big_file(&fx, "big", "big", 1000, 1500);
+    let mut server = mockito::Server::new();
+    let sizes: Arc<Mutex<Vec<usize>>> = Arc::default();
+    let sink = sizes.clone();
+    let mock = server
+        .mock("POST", "/api/ingest")
+        .with_body_from_request(move |req| {
+            let body = req.body().unwrap();
+            sink.lock().unwrap().push(body.len());
+            let n = serde_json::from_slice::<Value>(body).unwrap()["entries"].as_array().unwrap().len();
+            format!(r#"{{"accepted":{n},"duplicates":0}}"#).into_bytes()
+        })
+        .expect_at_least(2)
+        .create();
+    let client = ApiClient::new(&server.url(), Some("cct_test"));
+    let report = sync::run(&fx.paths, &fx.creds, &client, &opts(), now()).unwrap();
+    assert_eq!(report.entries_sent, 1002);
+    let sizes = sizes.lock().unwrap();
+    assert!(sizes.len() >= 2 && sizes.iter().all(|&s| s <= sync::MAX_BATCH_BYTES), "{sizes:?}");
+    assert_eq!(Offsets::load(&fx.paths.offsets()).get(&f).offset, fs::metadata(&f).unwrap().len());
+    mock.assert();
+}
+
+#[test]
+fn http_413_splits_the_batch_and_never_quarantines() {
+    let fx = fixture();
+    let f = big_file(&fx, "mid", "mid", 200, 500);
+    // A server with a much smaller body limit than ours.
+    let mut server = mockito::Server::new();
+    let ids: Arc<Mutex<Vec<String>>> = Arc::default();
+    let sink = ids.clone();
+    let too_big = |req: &mockito::Request| req.body().unwrap().len() > 30_000;
+    let mock = server
+        .mock("POST", "/api/ingest")
+        .with_status_code_from_request(move |req| if too_big(req) { 413 } else { 200 })
+        .with_body_from_request(move |req| {
+            if too_big(req) {
+                return br#"{"error":"request body too large"}"#.to_vec();
+            }
+            let body: Value = serde_json::from_slice(req.body().unwrap()).unwrap();
+            let entries = body["entries"].as_array().unwrap();
+            sink.lock().unwrap().extend(entries.iter().map(|e| e["message_id"].as_str().unwrap().to_string()));
+            format!(r#"{{"accepted":{},"duplicates":0}}"#, entries.len()).into_bytes()
+        })
+        .expect_at_least(3)
+        .create();
+    let client = ApiClient::new(&server.url(), Some("cct_test"));
+    let report = sync::run(&fx.paths, &fx.creds, &client, &opts(), now()).unwrap();
+    assert!(report.quarantined.is_empty());
+    assert_eq!(report.entries_sent, 202);
+    let ids = ids.lock().unwrap();
+    assert_eq!(ids.len(), 202);
+    assert_eq!(ids.iter().collect::<std::collections::HashSet<_>>().len(), 202, "each entry accepted exactly once");
+    assert_eq!(Offsets::load(&fx.paths.offsets()).get(&f).offset, fs::metadata(&f).unwrap().len());
+    assert!(!fx.paths.quarantine().exists());
+    mock.assert();
+}
+
+#[test]
+fn http_413_for_a_single_entry_stops_without_quarantine() {
+    let fx = fixture();
+    let mut server = mockito::Server::new();
+    // msg_1 + msg_3 (413) → msg_1 + snapshot alone (413): a single entry, so stop.
+    let mock = server.mock("POST", "/api/ingest").with_status(413).with_body(r#"{"error":"request body too large"}"#).expect(2).create();
+    let client = ApiClient::new(&server.url(), Some("cct_test"));
+    let err = sync::run(&fx.paths, &fx.creds, &client, &opts(), now()).unwrap_err();
+    assert!(err.to_string().contains("413"), "{err}");
+    assert!(!fx.paths.quarantine().exists());
+    assert_eq!(Offsets::load(&fx.paths.offsets()).get(&fx.transcript).offset, 0);
+    assert!(matches!(credentials::load(&fx.paths), AuthState::LoggedIn(_)));
+    mock.assert();
+}
+
+// ---- I3: a file of duplicates commits only with the batch carrying them ----
+
+#[test]
+fn duplicate_file_offset_waits_for_the_batch_carrying_its_messages() {
+    let fx = fixture();
+    let content = [line("dup", "dup_1", "2026-10-01T10:00:00Z"), line("dup", "dup_2", "2026-10-01T10:01:00Z")].join("\n") + "\n";
+    let original = fx.paths.projects_dir().join("-home-dev-a/dup.jsonl");
+    let copy = fx.paths.projects_dir().join("-home-dev-b/dup.jsonl");
+    for f in [&original, &copy] {
+        fs::create_dir_all(f.parent().unwrap()).unwrap();
+        fs::write(f, &content).unwrap();
+    }
+
+    let mut server = mockito::Server::new();
+    let failing = server.mock("POST", "/api/ingest").with_status(500).with_body(r#"{"error":"db down"}"#).expect(1).create();
+    let client = ApiClient::new(&server.url(), Some("cct_test"));
+    assert!(sync::run(&fx.paths, &fx.creds, &client, &opts(), now()).is_err());
+    let offsets = Offsets::load(&fx.paths.offsets());
+    assert_eq!(offsets.get(&original).offset, 0);
+    assert_eq!(offsets.get(&copy).offset, 0, "the duplicate file's offset must not advance before its messages are accepted");
+    failing.assert();
+
+    // The original disappears before the retry: the copy still carries the usage.
+    fs::remove_file(&original).unwrap();
+    let (server, mock, bodies) = recording_server(1);
+    let client = ApiClient::new(&server.url(), Some("cct_test"));
+    sync::run(&fx.paths, &fx.creds, &client, &opts(), now()).unwrap();
+    let ids: Vec<String> = bodies.lock().unwrap()[0]["entries"].as_array().unwrap().iter().map(|e| e["message_id"].as_str().unwrap().to_string()).collect();
+    assert!(ids.contains(&"dup_1".to_string()) && ids.contains(&"dup_2".to_string()), "{ids:?}");
+    assert_eq!(Offsets::load(&fx.paths.offsets()).get(&copy).offset, content.len() as u64);
+    mock.assert();
+}
+
+#[test]
+fn duplicate_file_commits_with_the_original_on_success() {
+    let fx = fixture();
+    let content = line("dup", "dup_1", "2026-10-01T10:00:00Z") + "\n";
+    let original = fx.paths.projects_dir().join("-home-dev-a/dup.jsonl");
+    let copy = fx.paths.projects_dir().join("-home-dev-b/dup.jsonl");
+    for f in [&original, &copy] {
+        fs::create_dir_all(f.parent().unwrap()).unwrap();
+        fs::write(f, &content).unwrap();
+    }
+    let (server, mock, bodies) = recording_server(1);
+    let client = ApiClient::new(&server.url(), Some("cct_test"));
+    let report = sync::run(&fx.paths, &fx.creds, &client, &opts(), now()).unwrap();
+    assert_eq!(report.entries_sent, 3, "dup_1 once + msg_1 + msg_3");
+    assert_eq!(bodies.lock().unwrap().len(), 1);
+    let offsets = Offsets::load(&fx.paths.offsets());
+    assert_eq!(offsets.get(&original).offset, content.len() as u64);
+    assert_eq!(offsets.get(&copy).offset, content.len() as u64);
+    mock.assert();
+}
+
+// ---- I8: quarantine scope, global rejections, one report per session ----
+
+#[test]
+fn quarantine_is_scoped_to_server_and_user() {
+    let fx = fixture();
+    // sess-1 was quarantined for another user and for another server, not for us.
+    fs::create_dir_all(&fx.paths.state_dir).unwrap();
+    fs::write(fx.paths.quarantine(), r#"{"http://unused|2":["sess-1"],"https://other.example.com|1":["sess-1"]}"#).unwrap();
+    let (server, mock, bodies) = recording_server(1);
+    let client = ApiClient::new(&server.url(), Some("cct_test"));
+    let report = sync::run(&fx.paths, &fx.creds, &client, &opts(), now()).unwrap();
+    assert_eq!(report.entries_sent, 2);
+    assert_eq!(bodies.lock().unwrap()[0]["sessions"][0]["session_id"], "sess-1");
+    mock.assert();
+
+    // Quarantined for us: skipped, and its offsets still advance.
+    let fx = fixture();
+    fs::create_dir_all(&fx.paths.state_dir).unwrap();
+    fs::write(fx.paths.quarantine(), r#"{"http://unused|1":["sess-1"]}"#).unwrap();
+    let client = ApiClient::new("http://127.0.0.1:9", Some("cct_test")); // only /me, offline
+    fs::remove_file(&fx.paths.claude_json).unwrap(); // no snapshot to send
+    let report = sync::run(&fx.paths, &fx.creds, &client, &opts(), now()).unwrap();
+    assert_eq!(report.entries_sent, 0);
+    assert!(Offsets::load(&fx.paths.offsets()).get(&fx.transcript).offset > 0);
+}
+
+#[test]
+fn identical_rejection_of_every_session_stops_without_quarantine() {
+    let fx = fixture();
+    let other = fx.paths.projects_dir().join("-home-dev-other/s2.jsonl");
+    fs::create_dir_all(other.parent().unwrap()).unwrap();
+    fs::write(&other, line("s2", "s2_1", "2026-10-01T10:00:00Z") + "\n").unwrap();
+    // E.g. the device clock is a day off: every request is invalid.
+    let mut server = mockito::Server::new();
+    let mock = server.mock("POST", "/api/ingest").with_status(400).with_body(r#"{"error":"ts too far in the future"}"#).expect(4).create();
+    let client = ApiClient::new(&server.url(), Some("cct_test"));
+    let err = sync::run(&fx.paths, &fx.creds, &client, &opts(), now()).unwrap_err().to_string();
+    assert!(err.contains("HTTP 400") && err.contains("ts too far in the future") && err.contains("nothing was quarantined"), "{err}");
+    assert!(!fx.paths.quarantine().exists());
+    let offsets = Offsets::load(&fx.paths.offsets());
+    assert_eq!(offsets.get(&fx.transcript).offset, 0);
+    assert_eq!(offsets.get(&other).offset, 0);
+    assert!(!fx.paths.last_snapshot().exists());
+    mock.assert(); // batch, s2 alone, sess-1 alone, snapshot alone
+}
+
+#[test]
+fn single_session_rejection_is_not_quarantined() {
+    let fx = fixture();
+    fs::remove_file(&fx.paths.claude_json).unwrap(); // no snapshot
+    let mut server = mockito::Server::new();
+    let mock = server.mock("POST", "/api/ingest").with_status(403).with_body(r#"{"error":"a session in this batch belongs to another user"}"#).expect(2).create();
+    let client = ApiClient::new(&server.url(), Some("cct_test"));
+    let err = sync::run(&fx.paths, &fx.creds, &client, &opts(), now()).unwrap_err().to_string();
+    assert!(err.contains("HTTP 403"), "{err}");
+    assert!(!fx.paths.quarantine().exists());
+    mock.assert();
+}
+
+#[test]
+fn session_spanning_batches_is_quarantined_and_reported_once() {
+    let fx = fixture();
+    let good = fx.paths.projects_dir().join("-home-dev-a/good.jsonl");
+    fs::create_dir_all(good.parent().unwrap()).unwrap();
+    fs::write(&good, (0..10).map(|i| line("good", &format!("good_{i}"), "2026-10-01T10:00:00Z")).collect::<Vec<_>>().join("\n") + "\n").unwrap();
+    // 1600 entries of "bad": 1490 land in batch 1 (after good's 10), 110 in batch 2.
+    let bad = fx.paths.projects_dir().join("-home-dev-b/bad.jsonl");
+    fs::create_dir_all(bad.parent().unwrap()).unwrap();
+    fs::write(&bad, (0..1600).map(|i| line("bad", &format!("bad_{i}"), "2026-10-01T10:00:00Z")).collect::<Vec<_>>().join("\n") + "\n").unwrap();
+
+    // batch 1 (403) → bad alone (403) → good alone (200) → snapshot alone (200) → batch 2 without bad (200).
+    let (server, mock, bodies) = refusing_server(5);
+    let client = ApiClient::new(&server.url(), Some("cct_test"));
+    let report = sync::run(&fx.paths, &fx.creds, &client, &opts(), now()).unwrap();
+    assert_eq!(report.quarantined, vec!["bad".to_string()]);
+    {
+        let bodies = bodies.lock().unwrap();
+        let last = bodies.last().unwrap();
+        let ids: Vec<&str> = last["entries"].as_array().unwrap().iter().map(|e| e["message_id"].as_str().unwrap()).collect();
+        assert_eq!(ids.len(), 2, "batch 2 carries only msg_1 + msg_3: {ids:?}");
+    }
+    let log = fs::read_to_string(fx.paths.sync_log()).unwrap();
+    assert_eq!(log.matches("quarantined session bad").count(), 1, "{log}");
+    assert_eq!(Offsets::load(&fx.paths.offsets()).get(&bad).offset, fs::metadata(&bad).unwrap().len());
     mock.assert();
 }
