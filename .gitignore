@@ -1,0 +1,13 @@
+# Go
+apps/server/.env
+apps/server/bin/
+# Rust
+apps/cli/target/
+# Web
+apps/web/node_modules/
+apps/web/dist/
+# OS / editors
+.DS_Store
+.idea/
+.vscode/
+.vercel
