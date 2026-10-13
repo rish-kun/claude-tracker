@@ -18,7 +18,12 @@ func (s *Server) Ingest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req api.IngestRequest
-	if !decodeJSON(w, r, &req) {
+	raw, ok := readJSON(w, r, &req)
+	if !ok {
+		return
+	}
+	if err := checkIngestKeys(raw); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	if err := validateIngest(&req, s.now()); err != nil {
@@ -49,6 +54,10 @@ func (s *Server) SetSessionSummary(w http.ResponseWriter, r *http.Request, sessi
 	summary := strings.TrimSpace(body.Summary)
 	if summary == "" || utf8.RuneCountInString(summary) > maxSummaryRunes {
 		writeError(w, http.StatusBadRequest, "summary must be 1-500 characters")
+		return
+	}
+	if hasNUL(summary, sessionId) {
+		writeError(w, http.StatusBadRequest, "summary and session id must not contain NUL")
 		return
 	}
 	err := s.store.SetSummary(r.Context(), p.User.ID, sessionId, summary)
