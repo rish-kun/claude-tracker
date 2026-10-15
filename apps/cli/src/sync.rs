@@ -585,10 +585,7 @@ fn scan_files(
         }
         if !f.subagent {
             for t in new.lines.iter().filter_map(|l| transcript::parse_title(l, &f.session_hint)) {
-                let id = match &t {
-                    TitleLine::Ai { session_id, .. } | TitleLine::Custom { session_id, .. } => session_id,
-                };
-                if !quarantined(id) {
+                if !quarantined(title_session(&t)) {
                     states.note_title(t, now);
                 }
             }
@@ -609,6 +606,60 @@ fn scan_files(
         out.pending.push((f.path.clone(), new.end, entries));
     }
     out
+}
+
+fn title_session(t: &TitleLine) -> &str {
+    match t {
+        TitleLine::Ai { session_id, .. } | TitleLine::Custom { session_id, .. } => session_id,
+    }
+}
+
+/// One-time pass when `sessions.json` does not exist yet (the first sync of
+/// a version that keeps it): titles in the bytes of main transcripts that
+/// earlier syncs already read are recorded, with the time range of the
+/// usage in those bytes that was uploaded (since login), so a title-only
+/// update can be sent for sessions uploaded before. Reads only; offsets
+/// stay as they are and no entry is queued.
+fn backfill_titles(
+    files: &[TranscriptFile],
+    offsets: &Offsets,
+    creds: &Credentials,
+    quarantined: impl Fn(&str) -> bool,
+    states: &mut SessionStates,
+    now: DateTime<Utc>,
+) {
+    for f in files.iter().filter(|f| !f.subagent) {
+        let stored = offsets.get(&f.path);
+        if stored.offset == 0 {
+            continue; // never read: scan_files reads it from the start
+        }
+        let mut titles = Vec::new();
+        // parse_title skips lines without `-title"` before parsing JSON.
+        let read = scan::for_each_line_before(&f.path, &stored, |l| titles.extend(transcript::parse_title(l, &f.session_hint)));
+        titles.retain(|t| !quarantined(title_session(t)));
+        if !matches!(read, Ok(true)) || titles.is_empty() {
+            continue;
+        }
+        let ids: HashSet<String> = titles.iter().map(|t| title_session(t).to_string()).collect();
+        let mut range: HashMap<String, (DateTime<Utc>, DateTime<Utc>)> = HashMap::new();
+        let _ = scan::for_each_line_before(&f.path, &stored, |l| {
+            if let Some(e) = transcript::parse_line(l, false, &f.session_hint)
+                && e.ts >= creds.logged_in_at
+                && ids.contains(&e.session_id)
+            {
+                let r = range.entry(e.session_id).or_insert((e.ts, e.ts));
+                r.0 = r.0.min(e.ts);
+                r.1 = r.1.max(e.ts);
+            }
+        });
+        for t in titles {
+            states.note_title(t, now);
+        }
+        for (id, (first, last)) in range {
+            states.note_uploaded(&id, first, now);
+            states.note_uploaded(&id, last, now);
+        }
+    }
 }
 
 /// What the proxy logs say about one run's entries.
@@ -690,8 +741,17 @@ fn pool_attribution<Tz: TimeZone>(
             verdicts.insert(e.session_id.clone(), v);
         }
     }
-    // Proxied per a hook record, settings or mode on: these calibrate a log's clock.
-    let known: HashSet<String> = verdicts.iter().filter(|(_, v)| matches!(v, Verdict::Proxied(_))).map(|(id, _)| id.clone()).collect();
+    // Only sessions a hook recorded as running through a CLIProxyAPI whose
+    // log was there calibrate a log's clock: not mode on alone, nor a
+    // settings URL (which may be another local proxy).
+    let hooked: HashMap<String, PathBuf> = verdicts
+        .iter()
+        .filter(|(_, v)| matches!(v, Verdict::Proxied(_)))
+        .filter_map(|(id, _)| {
+            let m = proxy::session_marker(paths, id).filter(|m| m.proxy_url && m.log_found)?;
+            Some((id.clone(), m.cliproxy_dir))
+        })
+        .collect();
     // An earlier inference is kept.
     for (id, v) in verdicts.iter_mut() {
         if let Verdict::Infer { dir } = v
@@ -734,29 +794,41 @@ fn pool_attribution<Tz: TimeZone>(
         evidence_for(&logs, dir, &mut out);
     }
 
-    // A session known to be proxied whose entries all match nothing: the
-    // log's times may not be this machine's local time.
+    // A hook-recorded proxied session whose entries all match nothing: the
+    // log's times may not be this machine's local time. At least two such
+    // sessions are needed (a per-turn sync of one session never calibrates).
     for (dir, (times, chars)) in &dirs {
         let probes: Vec<&UsageEntry> =
-            entry_dirs.iter().filter(|(e, d)| d == dir && known.contains(&e.session_id)).map(|(e, _)| *e).collect();
+            entry_dirs.iter().filter(|(e, d)| d == dir && hooked.get(&e.session_id) == Some(d)).map(|(e, _)| *e).collect();
         let mut per_session: BTreeMap<&str, usize> = BTreeMap::new();
         for e in &probes {
             *per_session.entry(e.session_id.as_str()).or_default() += usize::from(out.evidence[&e.message_id]);
         }
-        if !per_session.values().any(|&m| m == 0) || !out.clock.may_calibrate(dir, now) {
+        if per_session.len() < 2 || !per_session.values().any(|&m| m == 0) || !out.clock.may_calibrate(dir, now) {
             continue;
         }
-        let current = probes.iter().filter(|e| out.evidence[&e.message_id]).count();
+        let current: Vec<bool> = probes.iter().map(|e| out.evidence[&e.message_id]).collect();
         let wide: Vec<(DateTime<Utc>, DateTime<Utc>)> = proxy::read_windows(times)
             .into_iter()
             .map(|(f, t)| (f - chrono::Duration::hours(14), t + chrono::Duration::hours(14)))
             .collect();
         let naive = PoolLog::load_windows(dir, &wide, chars, &Utc);
         let probe: Vec<(&str, &str, DateTime<Utc>)> = probes.iter().map(|e| (e.session_id.as_str(), e.model.as_str(), e.ts)).collect();
-        let found = proxy::calibrate(&naive.selections, &probe, current);
-        out.clock.record(dir, found, now);
-        if let Some((o, _)) = found {
-            logs.insert(dir.clone(), load_log(dir, times, chars, FixedOffset::east_opt(o * 60), tz));
+        // The new offset must not cost any session compared with this log
+        // (hook-recorded or not) a match it has now.
+        let found = proxy::calibrate(&naive.selections, &probe, &current).and_then(|(o, n)| {
+            let log = load_log(dir, times, chars, FixedOffset::east_opt(o * 60), tz);
+            let mut per: HashMap<&str, (usize, usize)> = HashMap::new();
+            for (e, _) in entry_dirs.iter().filter(|(_, d)| d == dir) {
+                let c = per.entry(e.session_id.as_str()).or_default();
+                c.0 += usize::from(out.evidence[&e.message_id]);
+                c.1 += usize::from(proxy::has_running_candidate(&log.selections, &e.session_id, &e.model, e.ts));
+            }
+            per.values().all(|&(was, new)| new >= was).then_some((o, n, log))
+        });
+        out.clock.record(dir, found.as_ref().map(|&(o, n, _)| (o, n)), now);
+        if let Some((_, _, log)) = found {
+            logs.insert(dir.clone(), log);
             evidence_for(&logs, dir, &mut out);
         }
     }
@@ -925,14 +997,29 @@ fn check_transcript(opts: &SyncOptions) -> Result<()> {
 fn files_to_scan(paths: &Paths, creds: &Credentials, opts: &SyncOptions) -> Vec<TranscriptFile> {
     match &opts.transcript {
         Some(t) => scan::session_files(t),
-        None => {
-            let since = SystemTime::from(creds.logged_in_at).checked_sub(Duration::from_secs(3600));
-            scan::discover(&paths.projects_dir(), since)
-        }
+        None => sweep_files(paths, creds),
     }
 }
 
+/// Every transcript written since shortly before login.
+fn sweep_files(paths: &Paths, creds: &Credentials) -> Vec<TranscriptFile> {
+    let since = SystemTime::from(creds.logged_in_at).checked_sub(Duration::from_secs(3600));
+    scan::discover(&paths.projects_dir(), since)
+}
+
 pub fn run(paths: &Paths, creds: &Credentials, client: &ApiClient, opts: &SyncOptions, now: DateTime<Utc>) -> Result<SyncReport> {
+    run_with(paths, creds, client, opts, proxy::env_mode().as_deref(), now)
+}
+
+/// [`run`] with `env_mode` as the value of `CCTRACK_PROXY_MODE`.
+pub fn run_with(
+    paths: &Paths,
+    creds: &Credentials,
+    client: &ApiClient,
+    opts: &SyncOptions,
+    env_mode: Option<&str>,
+    now: DateTime<Utc>,
+) -> Result<SyncReport> {
     check_transcript(opts)?;
     let mut report = SyncReport::default();
     let Some(_lock) = lock_file(&paths.sync_lock(), opts.wait_for_lock)? else {
@@ -952,7 +1039,11 @@ pub fn run(paths: &Paths, creds: &Credentials, client: &ApiClient, opts: &SyncOp
     let scope = Quarantine::scope(creds);
     let quarantine = Quarantine::load(&paths.quarantine());
     let mut offsets = Offsets::load(&paths.offsets());
+    let fresh = !paths.sessions().exists();
     let mut states = SessionStates::load(&paths.sessions());
+    if fresh {
+        backfill_titles(&sweep_files(paths, creds), &offsets, creds, |id| quarantine.contains(&scope, id), &mut states, now);
+    }
     let scanned = scan_files(&files, &mut offsets, false, creds, |id| quarantine.contains(&scope, id), &mut states, now);
     report.files_read = scanned.files_read;
     let pending = scanned.pending;
@@ -961,7 +1052,10 @@ pub fn run(paths: &Paths, creds: &Credentials, client: &ApiClient, opts: &SyncOp
     offsets.save(&paths.offsets())?;
 
     let all: Vec<&UsageEntry> = pending.iter().flat_map(|(_, _, es)| es.iter()).collect();
-    let (pmode, _) = proxy::mode(paths, proxy::env_mode().as_deref());
+    if let Some(w) = proxy::mode_env_warning(env_mode) {
+        log(paths, &w);
+    }
+    let (pmode, _) = proxy::mode(paths, env_mode);
     let outcome = pool_attribution(paths, pmode, &all, &mut states, now, &Local);
     // Inferred decisions and auth identities are kept now; pool account
     // counts only once their upload is accepted.
@@ -1106,7 +1200,11 @@ pub fn dry_run_with(
     let scope = Quarantine::scope(creds);
     let quarantine = Quarantine::load(&paths.quarantine());
     let mut offsets = Offsets::load(&paths.offsets());
+    let fresh = !paths.sessions().exists();
     let mut states = SessionStates::load(&paths.sessions());
+    if fresh {
+        backfill_titles(&sweep_files(paths, creds), &offsets, creds, |id| quarantine.contains(&scope, id), &mut states, now);
+    }
     if rescan {
         // As if nothing had been sent: every title is shown as pending, and
         // nothing counted from uploads (an inferred decision is kept).

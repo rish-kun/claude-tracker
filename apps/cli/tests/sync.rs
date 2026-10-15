@@ -1208,23 +1208,53 @@ fn pool_counts_are_kept_only_once_the_upload_is_accepted() {
     assert_eq!(st["log_evidence"], serde_json::json!({ "matched": 2, "total": 4 }), "{st}");
 }
 
-/// QA LOW: the log is in the proxy host's local time, which may not be ours.
-#[test]
-fn a_proxy_log_in_another_time_zone_is_calibrated() {
+/// The proxy host's local time, ±3 h from ours.
+fn other_tz() -> chrono::FixedOffset {
     use chrono::Offset;
-    use cctrack::proxy::{self, HookPoint, ProxyMode};
-    let fx = fixture();
-    pool_home(&fx);
     let ours = chrono::Local.offset_from_utc_datetime(&now().naive_utc()).fix().local_minus_utc();
-    let theirs = chrono::FixedOffset::east_opt(if ours >= 0 { ours - 3 * 3600 } else { ours + 3 * 3600 }).unwrap();
+    chrono::FixedOffset::east_opt(if ours >= 0 { ours - 3 * 3600 } else { ours + 3 * 3600 }).unwrap()
+}
+
+/// Two hook-recorded proxied sessions (9tz, 7tz) whose requests are logged
+/// in [`other_tz`].
+fn calibration_fixture(fx: &Fixture, hook_7tz: bool) {
+    use cctrack::proxy::{self, HookPoint, ProxyMode};
+    pool_home(fx);
+    let theirs = other_tz();
     let fmt = move |ts: &str| chrono::DateTime::parse_from_rfc3339(ts).unwrap().with_timezone(&theirs).format("%Y-%m-%d %H:%M:%S").to_string();
-    write_log_as(&fx, "main.log", &[
+    write_log_as(fx, "main.log", &[
         ("2026-10-01T10:00:00Z", Some("2026-10-01T10:00:21Z"), "t1", "claude:9...", "pool-a.json"),
         ("2026-10-01T10:01:00Z", Some("2026-10-01T10:01:21Z"), "t2", "claude:9...", "pool-a.json"),
         ("2026-10-01T10:02:00Z", Some("2026-10-01T10:02:21Z"), "t3", "claude:9...", "pool-b.json"),
+        ("2026-10-01T10:05:00Z", Some("2026-10-01T10:05:21Z"), "t4", "claude:7...", "pool-b.json"),
+        ("2026-10-01T10:06:00Z", Some("2026-10-01T10:06:21Z"), "t5", "claude:7...", "pool-b.json"),
     ], &fmt);
-    proxy::record_session(&fx.paths, "9tz", None, Some("http://127.0.0.1:8317"), HookPoint::SessionStart, ProxyMode::Auto, now());
-    transcript(&fx, "9tz", &["2026-10-01T10:00:20Z", "2026-10-01T10:01:20Z", "2026-10-01T10:02:20Z"]);
+    let mut hooked = vec!["9tz"];
+    if hook_7tz {
+        hooked.push("7tz");
+    }
+    for id in hooked {
+        proxy::record_session(&fx.paths, id, None, Some("http://127.0.0.1:8317"), HookPoint::SessionStart, ProxyMode::Auto, now());
+    }
+    transcript(fx, "9tz", &["2026-10-01T10:00:20Z", "2026-10-01T10:01:20Z", "2026-10-01T10:02:20Z"]);
+    transcript(fx, "7tz", &["2026-10-01T10:05:20Z", "2026-10-01T10:06:20Z"]);
+}
+
+fn clock_warning(dry: &sync::DryRun) -> bool {
+    dry.warnings.iter().any(|w| w.contains("read as"))
+}
+
+/// QA LOW: the log is in the proxy host's local time, which may not be ours.
+#[test]
+fn a_proxy_log_in_another_time_zone_is_calibrated() {
+    use cctrack::proxy;
+    let fx = fixture();
+    calibration_fixture(&fx, true);
+    let theirs = other_tz();
+
+    // A per-turn sync of one session has one session to go by: never calibrates.
+    let one = SyncOptions { transcript: Some(fx.paths.projects_dir().join("-home-dev-9tz/9tz.jsonl")), wait_for_lock: Duration::ZERO };
+    assert!(!clock_warning(&sync::dry_run(&fx.paths, &fx.creds, &one, false, now()).unwrap()));
 
     let dry = sync::dry_run(&fx.paths, &fx.creds, &opts(), false, now()).unwrap();
     let offset = cctrack::proxy::fmt_offset(theirs.local_minus_utc() / 60);
@@ -1237,11 +1267,48 @@ fn a_proxy_log_in_another_time_zone_is_calibrated() {
     let (server, mock, bodies) = recording_server(1);
     let client = ApiClient::new(&server.url(), Some("cct_test"));
     sync::run(&fx.paths, &fx.creds, &client, &opts(), now()).unwrap();
-    assert_eq!(all_accounts(&bodies.lock().unwrap())["9tz_2"], "pool-b-uuid");
+    let got = all_accounts(&bodies.lock().unwrap());
+    assert_eq!((got["9tz_2"].as_str(), got["7tz_1"].as_str()), ("pool-b-uuid", "pool-b-uuid"));
     mock.assert();
     // Cached per log, and shown by status.
     let status = proxy::status_report(&fx.paths, None, None, None, now());
     assert!(status.contains(&format!("read as {offset} instead of this machine's local time")), "{status}");
+}
+
+/// Review MED: only sessions a hook recorded as proxied calibrate: a session
+/// credited from the log only because mode is on does not count.
+#[test]
+fn calibration_needs_two_hook_recorded_sessions() {
+    let fx = fixture();
+    calibration_fixture(&fx, false);
+    let dry = sync::dry_run_with(&fx.paths, &fx.creds, &opts(), false, Some("on"), now()).unwrap();
+    assert!(!clock_warning(&dry), "{:?}", dry.warnings);
+    let (server, mock, _) = recording_server(1);
+    let client = ApiClient::new(&server.url(), Some("cct_test"));
+    sync::run_with(&fx.paths, &fx.creds, &client, &opts(), Some("on"), now()).unwrap();
+    mock.assert();
+    assert!(!fx.paths.proxy_log_clock().exists(), "nothing tried, nothing recorded");
+}
+
+/// Review MED: an offset that would cost a session that matches now its
+/// matches is not kept.
+#[test]
+fn calibration_never_costs_a_matching_session_its_matches() {
+    let fx = fixture();
+    calibration_fixture(&fx, true);
+    // A session without a hook record whose request is logged in our local
+    // time (in a rotated file) matches with the offset in use.
+    write_log_as(&fx, "main-2026-10-01T09-00-00.log", &[
+        ("2026-10-01T10:20:00Z", Some("2026-10-01T10:20:21Z"), "l1", "claude:5...", "pool-a.json"),
+    ], &local);
+    transcript(&fx, "5inf", &["2026-10-01T10:20:20Z"]);
+    let dry = sync::dry_run(&fx.paths, &fx.creds, &opts(), false, now()).unwrap();
+    assert!(!clock_warning(&dry), "{:?}", dry.warnings);
+    let s = dry.sessions.iter().find(|s| s.session_id == "9tz").unwrap();
+    assert!(s.accounts.keys().all(|(a, _)| a == "shared@example.com"), "{:?}", s.accounts);
+    // Without that session the same log is calibrated.
+    fs::remove_file(fx.paths.projects_dir().join("-home-dev-5inf/5inf.jsonl")).unwrap();
+    assert!(clock_warning(&sync::dry_run(&fx.paths, &fx.creds, &opts(), false, now()).unwrap()));
 }
 
 #[test]
@@ -1281,4 +1348,66 @@ fn failed_title_updates_are_reported() {
     assert_eq!(report.titles_sent, 0);
     assert!(report.title_errors.len() == 1 && report.title_errors[0].contains("title update failed"), "{:?}", report.title_errors);
     assert!(fs::read_to_string(fx.paths.sync_log()).unwrap().contains("title update failed"));
+}
+
+#[test]
+fn an_invalid_proxy_mode_override_is_logged_by_a_real_sync() {
+    let fx = fixture();
+    let (server, mock, _) = recording_server(1);
+    let client = ApiClient::new(&server.url(), Some("cct_test"));
+    sync::run_with(&fx.paths, &fx.creds, &client, &opts(), Some("maybe"), now()).unwrap();
+    mock.assert();
+    let log = fs::read_to_string(fx.paths.sync_log()).unwrap();
+    assert!(log.contains("ignoring CCTRACK_PROXY_MODE=\"maybe\""), "{log}");
+}
+
+/// Review MED: sessions uploaded before sessions.json existed (cctrack < 0.2.0)
+/// had their titles in bytes already read and no uploaded range: a one-time
+/// pass sends their titles without re-uploading anything or moving offsets.
+#[test]
+fn titles_of_sessions_uploaded_before_session_state_existed_are_sent_once() {
+    let fx = fixture();
+    let content = fs::read_to_string(&fx.transcript).unwrap();
+    fs::write(&fx.transcript, format!("{}\n{content}\n", r#"{"type":"ai-title","aiTitle":"Old session","sessionId":"sess-1"}"#)).unwrap();
+    // Uploaded by an older cctrack: offsets, but no sessions.json.
+    let (server, mock, _) = recording_server(1);
+    let client = ApiClient::new(&server.url(), Some("cct_test"));
+    sync::run(&fx.paths, &fx.creds, &client, &opts(), now()).unwrap();
+    mock.assert();
+    fs::remove_file(fx.paths.sessions()).unwrap();
+    let offsets_before = fs::read(fx.paths.offsets()).unwrap();
+
+    // The dry run shows it and changes nothing.
+    let dry = sync::dry_run(&fx.paths, &fx.creds, &opts(), false, now()).unwrap();
+    let s = dry.sessions.iter().find(|s| s.session_id == "sess-1").unwrap();
+    assert_eq!((s.title.as_deref(), s.title_pending, s.entries), (Some("Old session"), true, 0), "{s:?}");
+    assert!(!fx.paths.sessions().exists(), "a dry run changes no state");
+
+    // A per-turn sync of another session also catches it up.
+    let other = transcript(&fx, "sess-2", &["2026-10-01T11:00:00Z"]);
+    let one = SyncOptions { transcript: Some(other), wait_for_lock: Duration::ZERO };
+    let (server, mock, bodies) = recording_server(2);
+    let client = ApiClient::new(&server.url(), Some("cct_test"));
+    let report = sync::run(&fx.paths, &fx.creds, &client, &one, now()).unwrap();
+    mock.assert();
+    assert_eq!((report.entries_sent, report.titles_sent), (1, 1));
+    let bodies = bodies.lock().unwrap();
+    let title_only = bodies.iter().find(|b| b["entries"].as_array().unwrap().is_empty()).unwrap();
+    let s = sessions_of(title_only);
+    assert_eq!(s.len(), 1, "{title_only}");
+    assert_eq!((s[0]["session_id"].as_str(), s[0]["title"].as_str()), (Some("sess-1"), Some("Old session")));
+    // The range uploaded before (msg_1 to msg_4; msg_old predates login).
+    assert_eq!((s[0]["started_at"].as_str(), s[0]["ended_at"].as_str()), (Some("2026-10-01T10:00:00Z"), Some("2026-10-01T10:05:00Z")));
+    assert!(bodies.iter().all(|b| b["entries"].as_array().unwrap().iter().all(|e| e["session_id"] == "sess-2")), "nothing re-uploaded");
+    let offsets = Offsets::load(&fx.paths.offsets());
+    let before: Offsets = serde_json::from_slice(&offsets_before).unwrap();
+    assert_eq!(offsets.get(&fx.transcript), before.get(&fx.transcript), "the cursor stays");
+    drop(bodies);
+
+    // Once: the next sync has nothing to send.
+    let (server, mock, _) = recording_server(0);
+    let client = ApiClient::new(&server.url(), Some("cct_test"));
+    let report = sync::run(&fx.paths, &fx.creds, &client, &opts(), now()).unwrap();
+    assert_eq!((report.entries_sent, report.titles_sent), (0, 0));
+    mock.assert();
 }

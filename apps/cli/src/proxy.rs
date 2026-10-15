@@ -449,12 +449,18 @@ pub fn session_marker(paths: &Paths, session_id: &str) -> Option<Detection> {
     read_json(&marker_path(paths, session_id)?)
 }
 
+/// A session record (`<id>.json`), not a temp file left by an interrupted
+/// atomic write (`<id>.tmp.<pid>`).
+fn is_marker_file(path: &Path) -> bool {
+    path.extension().is_some_and(|e| e == "json")
+}
+
 /// Removes session records older than `max_age` (best effort).
 pub fn prune_markers(paths: &Paths, max_age: std::time::Duration) {
     let Ok(items) = fs::read_dir(paths.proxy_sessions_dir()) else { return };
     let Some(cutoff) = std::time::SystemTime::now().checked_sub(max_age) else { return };
     for item in items.flatten() {
-        if item.metadata().and_then(|m| m.modified()).is_ok_and(|m| m < cutoff) {
+        if is_marker_file(&item.path()) && item.metadata().and_then(|m| m.modified()).is_ok_and(|m| m < cutoff) {
             let _ = fs::remove_file(item.path());
         }
     }
@@ -547,8 +553,7 @@ pub fn pool_accounts(dir: &Path) -> Vec<String> {
         .flatten()
         .filter_map(|i| {
             let name = i.file_name().to_str()?.to_string();
-            auth_path(dir, &name)?;
-            let a = parse_auth(&fs::read(i.path()).ok()?)?;
+            let a = parse_auth(&read_auth_file(&auth_path(dir, &name)?)?)?;
             Some(a.email.unwrap_or(a.account_uuid))
         })
         .collect();
@@ -613,6 +618,7 @@ pub fn status_report(paths: &Paths, env_mode: Option<&str>, env_url: Option<&str
         .map(|items| {
             items
                 .flatten()
+                .filter(|i| is_marker_file(&i.path()))
                 .filter_map(|i| {
                     let id = i.path().file_stem()?.to_str()?.to_string();
                     Some((id, read_json::<Detection>(&i.path())?))
@@ -621,6 +627,8 @@ pub fn status_report(paths: &Paths, env_mode: Option<&str>, env_url: Option<&str
         })
         .unwrap_or_default();
     recent.sort_by(|a, b| b.1.detected_at.cmp(&a.1.detected_at).then(a.0.cmp(&b.0)));
+    let states = SessionStates::load(&paths.sessions());
+    let inferred_pool = |id: &str| states.get(id).and_then(|s| s.inferred.as_ref()).is_some_and(|i| i.proxied);
     out.push(format!("recent sessions ({} recorded; times UTC):", recent.len()));
     for (id, d) in recent.iter().take(10) {
         let log_now = d.log_exists_now();
@@ -629,18 +637,26 @@ pub fn status_report(paths: &Paths, env_mode: Option<&str>, env_url: Option<&str
             ProxyMode::On if log_now => "pool (mode on)",
             ProxyMode::On => "Claude account (mode on, but no log)",
             ProxyMode::Auto if d.proxy_url && log_now => "pool",
+            // A hook record beats an earlier inference from the log.
+            ProxyMode::Auto if inferred_pool(id) => "Claude account (hook record overrides the log inference)",
             ProxyMode::Auto => "Claude account",
         };
         out.push(format!("  {id} [{verdict}] {}: {}", d.detected_at.format("%Y-%m-%d %H:%M UTC"), d.describe_now()));
     }
-    let states = SessionStates::load(&paths.sessions());
     let inferred: Vec<_> = states.sessions.iter().filter_map(|(id, s)| Some((id, s.inferred.as_ref()?))).collect();
     if !inferred.is_empty() {
         out.push(format!("sessions inferred from the proxy log ({}):", inferred.len()));
         for (id, i) in inferred {
+            // A session that got a hook record since is credited per that record.
+            let label = if mode == ProxyMode::Auto && session_marker(paths, id).is_some() {
+                "superseded by a hook record"
+            } else if i.proxied {
+                "pool"
+            } else {
+                "Claude account"
+            };
             out.push(format!(
-                "  {id} [{}] decided {}: {} of {} entries ran during a matching proxy request",
-                if i.proxied { "pool" } else { "Claude account" },
+                "  {id} [{label}] decided {}: {} of {} entries ran during a matching proxy request",
                 i.decided_at.format("%Y-%m-%d %H:%M UTC"),
                 i.matched,
                 i.total
@@ -1066,23 +1082,40 @@ pub fn match_entry<'a>(selections: &'a [Selection], session_id: &str, model: &st
 /// The UTC offset (minutes east) that best explains a log whose times are
 /// not this machine's local time: `naive` holds selections read with their
 /// times taken as UTC, `probes` the (session id, model, timestamp) of
-/// entries of sessions known to be proxied, and `current` how many of them
-/// match with the offset in use. Returns the offset and its matches only for
-/// a clear winner: at least 3 matches and half the probes, and at least twice
-/// as many as any other offset and as `current`.
-pub fn calibrate(naive: &[Selection], probes: &[(&str, &str, DateTime<Utc>)], current: usize) -> Option<(i32, usize)> {
+/// entries of sessions recorded as proxied by a hook, and `current` whether
+/// each probe matches with the offset in use. Returns the offset and its
+/// matches only for a clear winner: at least 3 matches from at least 2
+/// distinct sessions and half the probes, at least twice as many as any
+/// other offset and as match now, and no session matching fewer entries
+/// than it does now.
+pub fn calibrate(naive: &[Selection], probes: &[(&str, &str, DateTime<Utc>)], current: &[bool]) -> Option<(i32, usize)> {
+    let matches_at = |o: i32| -> Vec<bool> {
+        // Local = UTC + o, so an entry at `ts` is logged at `ts + o`.
+        let shift = Duration::minutes(i64::from(o));
+        probes.iter().map(|(sid, model, ts)| has_running_candidate(naive, sid, model, *ts + shift)).collect()
+    };
     let mut counts = Vec::new();
     let mut o = -CALIBRATION_RANGE_MINUTES;
     while o <= CALIBRATION_RANGE_MINUTES {
-        // Local = UTC + o, so an entry at `ts` is logged at `ts + o`.
-        let shift = Duration::minutes(i64::from(o));
-        let n = probes.iter().filter(|(sid, model, ts)| has_running_candidate(naive, sid, model, *ts + shift)).count();
-        counts.push((o, n));
+        counts.push((o, matches_at(o).into_iter().filter(|&m| m).count()));
         o += CALIBRATION_STEP_MINUTES;
     }
     let &(best_o, best) = counts.iter().max_by_key(|&&(o, n)| (n, Reverse(o.abs()), o))?;
     let second = counts.iter().filter(|&&(o, _)| o != best_o).map(|&(_, n)| n).max().unwrap_or(0);
-    (best >= 3 && 2 * best >= probes.len() && best >= 2 * second && best >= 2 * current).then_some((best_o, best))
+    let now_matched = current.iter().filter(|&&m| m).count();
+    if !(best >= 3 && 2 * best >= probes.len() && best >= 2 * second && best >= 2 * now_matched) {
+        return None;
+    }
+    // Per session: entries matched now and with the winner.
+    let mut per_session: HashMap<&str, (usize, usize)> = HashMap::new();
+    for (((sid, _, _), &now), new) in probes.iter().zip(current).zip(matches_at(best_o)) {
+        let c = per_session.entry(sid).or_default();
+        c.0 += usize::from(now);
+        c.1 += usize::from(new);
+    }
+    let sessions = per_session.values().filter(|&&(_, new)| new > 0).count();
+    let regresses = per_session.values().any(|&(now, new)| new < now);
+    (sessions >= 2 && !regresses).then_some((best_o, best))
 }
 
 /// A log's clock when it is not this machine's local time.
@@ -1179,8 +1212,22 @@ fn auth_path(dir: &Path, auth: &str) -> Option<PathBuf> {
     let ok = auth.ends_with(".json")
         && auth.len() <= 255
         && !auth.starts_with('.')
-        && !auth.contains(['/', '\\', '\0']);
+        && !auth.contains(['/', '\\', ':', '\0']);
     ok.then(|| dir.join(auth))
+}
+
+/// Largest auth file read: a CLIProxyAPI auth file is a few KB.
+const MAX_AUTH_BYTES: u64 = 1024 * 1024;
+
+/// An auth file's bytes; None when it is unreadable or larger than [`MAX_AUTH_BYTES`].
+fn read_auth_file(path: &Path) -> Option<Vec<u8>> {
+    let f = File::open(path).ok()?;
+    if f.metadata().ok()?.len() > MAX_AUTH_BYTES {
+        return None;
+    }
+    let mut bytes = Vec::new();
+    f.take(MAX_AUTH_BYTES + 1).read_to_end(&mut bytes).ok()?;
+    (bytes.len() as u64 <= MAX_AUTH_BYTES).then_some(bytes)
 }
 
 fn clean(s: Option<String>) -> Option<String> {
@@ -1274,7 +1321,7 @@ impl PoolResolver {
         let read = self
             .auths
             .entry((dir.to_path_buf(), auth.to_string()))
-            .or_insert_with(|| auth_path(dir, auth).and_then(|p| fs::read(p).ok()).and_then(|b| parse_auth(&b)))
+            .or_insert_with(|| auth_path(dir, auth).and_then(|p| read_auth_file(&p)).and_then(|b| parse_auth(&b)))
             .clone();
         match read {
             Some(a) => {
@@ -1564,9 +1611,65 @@ mod tests {
             assert_eq!(parse_auth(bad), None, "{}", String::from_utf8_lossy(bad));
         }
         assert_eq!(auth_path(Path::new("/p"), "claude-a@b.json"), Some(PathBuf::from("/p/claude-a@b.json")));
-        for bad in ["../x.json", "a/b.json", ".hidden.json", "config.yaml", "x\\y.json"] {
+        for bad in ["../x.json", "a/b.json", ".hidden.json", "config.yaml", "x\\y.json", "C:x.json", "c:..\\x.json"] {
             assert_eq!(auth_path(Path::new("/p"), bad), None, "{bad}");
         }
+    }
+
+    #[test]
+    fn oversized_auth_files_are_not_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let ok = r#"{"type":"claude","account_uuid":"acc-ok","email":"ok@x"}"#;
+        fs::write(dir.path().join("ok.json"), ok).unwrap();
+        // Valid JSON identity, padded past the 1 MiB cap.
+        let big = format!(r#"{{"type":"claude","account_uuid":"acc-big","email":"big@x","pad":"{}"}}"#, "x".repeat(MAX_AUTH_BYTES as usize));
+        fs::write(dir.path().join("big.json"), big).unwrap();
+        assert_eq!(pool_accounts(dir.path()), vec!["ok@x".to_string()]);
+        let mut r = PoolResolver::default();
+        assert_eq!(r.account(dir.path(), "ok.json").unwrap().account_uuid, "acc-ok");
+        assert_eq!(r.account(dir.path(), "big.json"), None);
+    }
+
+    #[test]
+    fn stray_temp_files_in_the_markers_dir_are_not_sessions() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::under(dir.path());
+        let now = utc("2026-10-15T10:00:00Z");
+        with_log(&paths);
+        record_session(&paths, "sess-a", None, Some("http://127.0.0.1:8317"), HookPoint::SessionStart, ProxyMode::Auto, now);
+        let markers = paths.proxy_sessions_dir();
+        // Left by an interrupted atomic write.
+        let tmp = markers.join("sess-b.tmp.4242");
+        fs::copy(markers.join("sess-a.json"), &tmp).unwrap();
+        let out = status_report(&paths, None, None, None, now);
+        assert!(out.contains("recent sessions (1 recorded") && !out.contains("sess-b"), "{out}");
+        // Pruning only removes session records.
+        let hour_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+        for p in [&tmp, &markers.join("sess-a.json")] {
+            File::options().write(true).open(p).unwrap().set_modified(hour_ago).unwrap();
+        }
+        prune_markers(&paths, std::time::Duration::from_secs(60));
+        assert!(tmp.exists() && !markers.join("sess-a.json").exists());
+    }
+
+    #[test]
+    fn status_labels_inferred_sessions_by_what_a_sync_credits() {
+        use crate::sessions::{Inferred, SessionStates};
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::under(dir.path());
+        let now = utc("2026-10-15T10:00:00Z");
+        with_log(&paths);
+        let mut st = SessionStates::default();
+        for id in ["inf-only", "inf-hooked"] {
+            st.touch(id, now).inferred = Some(Inferred { proxied: true, matched: 5, total: 5, decided_at: now });
+        }
+        st.save(&paths.sessions(), now).unwrap();
+        // A later Stop hook added a record without ANTHROPIC_BASE_URL: it wins.
+        record_session(&paths, "inf-hooked", None, None, HookPoint::Later, ProxyMode::Auto, now);
+        let out = status_report(&paths, None, None, None, now);
+        assert!(out.contains("inf-hooked [Claude account (hook record overrides the log inference)]"), "{out}");
+        assert!(out.contains("  inf-hooked [superseded by a hook record] decided"), "{out}");
+        assert!(out.contains("  inf-only [pool] decided"), "{out}");
     }
 
     #[test]
@@ -1991,18 +2094,34 @@ mod tests {
         let mut naive: Vec<Selection> = (0..6).map(|i| naive_sel(base + Duration::minutes(i * 7), '9', 20)).collect();
         naive.push(naive_sel(base + Duration::hours(2), '3', 20));
         naive.sort_by_key(|s| s.at);
-        let probes: Vec<(&str, &str, DateTime<Utc>)> = (0..6).map(|i| ("9c01", "m", base + Duration::minutes(i * 7) + Duration::seconds(18))).collect();
-        assert_eq!(calibrate(&naive, &probes, 0), Some((330, 6)));
+        // Two hook-recorded proxied sessions.
+        let session = |i: i64| if i % 2 == 0 { "9c01" } else { "9d02" };
+        let probes: Vec<(&str, &str, DateTime<Utc>)> =
+            (0..6).map(|i| (session(i), "m", base + Duration::minutes(i * 7) + Duration::seconds(18))).collect();
+        let none = |n: usize| vec![false; n];
+        assert_eq!(calibrate(&naive, &probes, &none(6)), Some((330, 6)));
         // Not a clear winner: too few matches, or no better than the current offset.
-        assert_eq!(calibrate(&naive, &probes[..2], 0), None);
-        assert_eq!(calibrate(&naive, &probes, 4), None);
+        assert_eq!(calibrate(&naive, &probes[..2], &none(2)), None);
+        assert_eq!(calibrate(&naive, &probes, &[true, true, true, true, false, false]), None);
         // Most probes match nothing at any offset (e.g. their log lines are gone).
         let mut sparse = probes.clone();
         sparse.extend((0..7).map(|i| ("9c01", "m", base + Duration::hours(5) + Duration::minutes(i * 3))));
-        assert_eq!(calibrate(&naive, &sparse, 0), None);
-        assert_eq!(calibrate(&naive, &sparse[..12], 0), Some((330, 6)));
+        assert_eq!(calibrate(&naive, &sparse, &none(13)), None);
+        assert_eq!(calibrate(&naive, &sparse[..12], &none(12)), Some((330, 6)));
         // Nothing to find.
-        assert_eq!(calibrate(&naive, &[("1abc", "m", base)], 0), None);
+        assert_eq!(calibrate(&naive, &[("1abc", "m", base)], &none(1)), None);
+        // One session alone never decides (e.g. a per-turn sync of one session).
+        let one: Vec<_> = probes.iter().map(|&(_, m, t)| ("9c01", m, t)).collect();
+        assert_eq!(calibrate(&naive, &one, &none(6)), None);
+        // A session that matches with the offset in use must not lose matches.
+        let three = base + Duration::hours(2);
+        let three_naive = three.with_timezone(&ist()).naive_local().and_utc() + Duration::seconds(10);
+        let mut with_matching = probes.clone();
+        with_matching.push(("3e03", "m", three_naive));
+        let mut current = none(6);
+        current.push(true);
+        assert_eq!(calibrate(&naive, &with_matching, &current), None, "3e03 matches now, not at +05:30");
+        assert_eq!(calibrate(&naive, &with_matching, &none(7)), Some((330, 6)), "the same probes without a current match");
         assert_eq!(fmt_offset(330), "UTC+05:30");
         assert_eq!(fmt_offset(-210), "UTC-03:30");
         // The clock is retried only after a day when nothing was found.

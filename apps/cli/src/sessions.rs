@@ -139,10 +139,11 @@ impl SessionStates {
         read_json(path).unwrap_or_default()
     }
 
-    /// Drops sessions untouched for [`RETENTION`] and saves.
+    /// Drops sessions untouched for [`RETENTION`] and saves (owner-only: it
+    /// holds pool account emails and session titles).
     pub fn save(&mut self, path: &Path, now: DateTime<Utc>) -> Result<()> {
         self.sessions.retain(|_, s| s.touched_at.is_none_or(|t| t + RETENTION >= now));
-        write_json_atomic(path, self, None)
+        write_json_atomic(path, self, Some(0o600))
     }
 
     pub fn get(&self, session_id: &str) -> Option<&SessionState> {
@@ -257,5 +258,19 @@ mod tests {
         let back = SessionStates::load(&path);
         assert!(back.get("s").is_none(), "expired");
         assert_eq!(back.get("new").unwrap().title(), Some("t"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn saved_owner_only_even_over_an_older_world_readable_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sessions.json");
+        std::fs::write(&path, "{}").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let mut st = SessionStates::load(&path);
+        st.note_title(ai("t"), now());
+        st.save(&path, now()).unwrap();
+        assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
     }
 }
