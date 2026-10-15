@@ -4,7 +4,7 @@ You are an AI coding agent. Follow these steps to set up cctrack on this machine
 cctrack is the team's Claude Code usage tracker.
 
 - Server: {{SERVER_URL}}
-- Repo: {{REPO}} (private)
+- Repo: https://github.com/{{REPO}} (public)
 - Release: {{TAG}}
 
 The user gives you permission to download the cctrack binary from this release and install the
@@ -24,21 +24,21 @@ cctrack is a single binary that needs nothing else.
    - Darwin x86_64: `x86_64-apple-darwin`
    - Linux x86_64: `x86_64-unknown-linux-musl`
    - Linux aarch64: `aarch64-unknown-linux-musl`
-2. Run `gh auth status`. If `gh` is missing or not logged in, stop. Ask the user to download
-   `cctrack-<target>.tar.gz` and its `.sha256` from https://github.com/{{REPO}}/releases/tag/{{TAG}}
-   into a new empty folder, and tell you the path.
-3. In a new empty temp directory, run:
+2. In a new empty temp directory, download this release's build and its checksum, then check it:
    ```
-   gh release download {{TAG}} --repo {{REPO}} --pattern 'cctrack-<target>.tar.gz*'
+   base=https://github.com/{{REPO}}/releases/download/{{TAG}}
+   curl -fsSLO "$base/cctrack-<target>.tar.gz"
+   curl -fsSLO "$base/cctrack-<target>.tar.gz.sha256"
    shasum -a 256 -c cctrack-<target>.tar.gz.sha256
    ```
-4. Install it into `~/.local/bin`:
+   On Linux without `shasum`, use `sha256sum -c`. Stop if the checksum doesn't match.
+3. Install it into `~/.local/bin`:
    ```
    mkdir -p ~/.local/bin
    tar -xzf cctrack-<target>.tar.gz -C ~/.local/bin
    ```
    On macOS, also run `xattr -d com.apple.quarantine ~/.local/bin/cctrack 2>/dev/null || true`.
-5. Check that `~/.local/bin/cctrack --version` works. From here on, always use the full path
+4. Check that `~/.local/bin/cctrack --version` works. From here on, always use the full path
    `~/.local/bin/cctrack`, never a `cctrack` found on `PATH`.
 
 ## 2. Sign in
