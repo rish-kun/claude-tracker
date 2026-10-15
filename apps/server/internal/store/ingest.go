@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
 
@@ -27,6 +28,26 @@ func project(cwd *string) *string {
 		p = p[i+1:]
 	}
 	return &p
+}
+
+// MaxTitleRunes caps a stored session title.
+const MaxTitleRunes = 200
+
+// SessionTitle normalises a client-sent session title: trimmed and cut to
+// MaxTitleRunes characters. Empty (or absent) is nil, which the upsert treats
+// as "keep the stored title".
+func SessionTitle(t *string) *string {
+	if t == nil {
+		return nil
+	}
+	v := strings.TrimSpace(*t)
+	if utf8.RuneCountInString(v) > MaxTitleRunes {
+		v = strings.TrimSpace(string([]rune(v)[:MaxTitleRunes]))
+	}
+	if v == "" {
+		return nil
+	}
+	return &v
 }
 
 func ptrOrNil(s *string) *string {
@@ -120,10 +141,12 @@ func (s *Store) Ingest(ctx context.Context, userID int64, req *api.IngestRequest
 		// Metadata is latest-wins by observed time: a batch whose ended_at is
 		// older than the stored one (a replay or a late upload) only fills
 		// gaps and never overwrites newer account/device/cwd/branch values.
+		// A non-empty title always replaces the stored one (Claude Code
+		// regenerates titles); an absent/empty one never clears it.
 		var got string
 		err := tx.QueryRow(ctx, `
-			INSERT INTO sessions (session_id, user_id, device_id, account_id, cwd, project, git_branch, started_at, ended_at)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+			INSERT INTO sessions (session_id, user_id, device_id, account_id, cwd, project, git_branch, started_at, ended_at, title)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 			ON CONFLICT (session_id) DO UPDATE SET
 			  device_id = CASE WHEN EXCLUDED.ended_at >= sessions.ended_at
 			    THEN COALESCE(EXCLUDED.device_id, sessions.device_id) ELSE COALESCE(sessions.device_id, EXCLUDED.device_id) END,
@@ -135,12 +158,13 @@ func (s *Store) Ingest(ctx context.Context, userID int64, req *api.IngestRequest
 			    THEN COALESCE(EXCLUDED.project, sessions.project) ELSE COALESCE(sessions.project, EXCLUDED.project) END,
 			  git_branch = CASE WHEN EXCLUDED.ended_at >= sessions.ended_at
 			    THEN COALESCE(EXCLUDED.git_branch, sessions.git_branch) ELSE COALESCE(sessions.git_branch, EXCLUDED.git_branch) END,
+			  title = COALESCE(EXCLUDED.title, sessions.title),
 			  started_at = LEAST(sessions.started_at, EXCLUDED.started_at),
 			  ended_at = GREATEST(sessions.ended_at, EXCLUDED.ended_at)
 			WHERE sessions.user_id = EXCLUDED.user_id
 			RETURNING session_id`,
 			sess.SessionId, userID, deviceID, acct, ptrOrNil(sess.Cwd), project(sess.Cwd), ptrOrNil(sess.GitBranch),
-			sess.StartedAt, sess.EndedAt).Scan(&got)
+			sess.StartedAt, sess.EndedAt, SessionTitle(sess.Title)).Scan(&got)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return IngestResult{}, ErrForbidden
 		}

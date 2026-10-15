@@ -149,6 +149,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/sessions/{sessionId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** @description One session with its usage broken down (main thread vs subagents, by model). Visible to the session's owner, and to admins signed in with a browser session; anyone else gets 404 so session ids are not confirmed to exist. */
+        get: operations["getSession"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/sessions/{sessionId}/summary": {
         parameters: {
             query?: never;
@@ -411,6 +428,8 @@ export interface components {
             session_id: string;
             cwd?: string;
             git_branch?: string;
+            /** @description Claude Code's short session title. Trimmed and truncated to 200 characters. A non-empty title replaces the stored one; an absent or empty title keeps it. */
+            title?: string;
             /** Format: date-time */
             started_at: string;
             /** Format: date-time */
@@ -555,14 +574,48 @@ export interface components {
             user: components["schemas"]["UserRef"];
             account?: components["schemas"]["AccountRef"];
             device_hostname?: string;
+            cwd?: string;
             project?: string;
             git_branch?: string;
+            /** @description Claude Code's session title, when known */
+            title?: string;
             /** Format: date-time */
             started_at: string;
             /** Format: date-time */
             ended_at: string;
             summary?: string;
             totals: components["schemas"]["Totals"];
+        };
+        SessionPart: {
+            totals: components["schemas"]["Totals"];
+            /**
+             * Format: int64
+             * @description Number of usage entries (API responses)
+             */
+            calls: number;
+        };
+        SessionModelUsage: {
+            model: string;
+            totals: components["schemas"]["Totals"];
+            /** Format: int64 */
+            calls: number;
+        };
+        SessionDetail: {
+            session: components["schemas"]["Session"];
+            /**
+             * Format: int64
+             * @description Number of usage entries (API responses)
+             */
+            calls: number;
+            /**
+             * Format: int64
+             * @description Largest prompt of any one call (input + cache_read + cache_write_5m + cache_write_1h).
+             */
+            peak_context_tokens: number;
+            main: components["schemas"]["SessionPart"];
+            subagents: components["schemas"]["SessionPart"];
+            /** @description Sorted by cost descending, then model. */
+            by_model: components["schemas"]["SessionModelUsage"][];
         };
         SessionPage: {
             items: components["schemas"]["Session"][];
@@ -911,6 +964,30 @@ export interface operations {
                     "application/json": components["schemas"]["Error"];
                 };
             };
+        };
+    };
+    getSession: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                sessionId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Session detail */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SessionDetail"];
+                };
+            };
+            401: components["responses"]["Error"];
+            404: components["responses"]["Error"];
         };
     };
     setSessionSummary: {

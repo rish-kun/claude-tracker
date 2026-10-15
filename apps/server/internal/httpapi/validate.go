@@ -75,7 +75,7 @@ func validateIngest(req *api.IngestRequest, now time.Time) error {
 		if s.SessionId == "" || len(s.SessionId) > 100 {
 			return fmt.Errorf("sessions[%d].session_id is required (max 100 chars)", i)
 		}
-		if hasNUL(s.SessionId, derefStr(s.Cwd), derefStr(s.GitBranch)) {
+		if hasNUL(s.SessionId, derefStr(s.Cwd), derefStr(s.GitBranch), derefStr(s.Title)) {
 			return fmt.Errorf("sessions[%d]: strings must not contain NUL", i)
 		}
 		if !inRange(s.StartedAt, latest) || !inRange(s.EndedAt, latest) {

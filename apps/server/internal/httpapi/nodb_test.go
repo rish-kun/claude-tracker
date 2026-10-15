@@ -79,6 +79,7 @@ func TestNoDBRequestHandling(t *testing.T) {
 		{"anonymous usage", "GET", "/api/me/usage?from=2026-10-01T00:00:00Z&to=2026-10-02T00:00:00Z", "", nil, 401, "not logged in"},
 		{"anonymous sessions", "GET", "/api/me/sessions", "", nil, 401, "not logged in"},
 		{"anonymous ingest", "POST", "/api/ingest", "{}", nil, 401, "not logged in"},
+		{"anonymous session detail", "GET", "/api/sessions/s1", "", nil, 401, "not logged in"},
 		{"anonymous summary", "POST", "/api/sessions/s1/summary", `{"summary":"x"}`, nil, 401, "not logged in"},
 		{"cookie POST without CSRF header", "POST", "/api/auth/logout", "", []string{"Cookie", sessionCookie + "=bogus"}, 403, "X-CCTrack"},
 		{"cookie POST with CSRF header", "POST", "/api/auth/logout", "", []string{"Cookie", sessionCookie + "=bogus", csrfHeader, "1"}, 204, ""},
