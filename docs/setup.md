@@ -73,7 +73,11 @@ If you downloaded it with a browser, macOS quarantines the file; clear that with
 `xattr -d com.apple.quarantine ~/.local/bin/cctrack`. Each asset has a `.sha256` file next to it.
 
 A maintainer publishes a release by pushing a tag such as `cli-v0.1.0` (the
-`release` workflow builds every target). To build from source instead, run
+`release` workflow builds every target).
+Every release also carries `setup.md`, step-by-step instructions to give a Claude Code agent
+so it can install the CLI, sign in and add the plugin. Its server URL comes from the repo
+variable `CCTRACK_SERVER_URL` (default `https://claude-tracker-inky.vercel.app`); the template is
+`release/setup.md`. To build from source instead, run
 `cargo install --path apps/cli` (needs Rust 1.89+).
 On a machine without a browser, sign in the first time with
 `cctrack login --server https://cctrack.example.com --paste` (afterwards `cctrack login --paste`
