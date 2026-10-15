@@ -215,6 +215,9 @@ fn sync_cmd(paths: &Paths, transcript: Option<std::path::PathBuf>, quiet: bool) 
                     println!("cctrack: updated {} session titles", r.titles_sent);
                 }
             }
+            for msg in &r.title_errors {
+                eprintln!("cctrack: {msg}");
+            }
             for id in &r.quarantined {
                 eprintln!("cctrack: the server refused session {id}; its usage was dropped and it will not be retried (see {})", paths.sync_log().display());
             }
@@ -268,7 +271,7 @@ fn dry_run(paths: &Paths, transcript: Option<std::path::PathBuf>, rescan: bool) 
         anyhow::bail!("not logged in — run `cctrack login`");
     };
     let opts = cctrack::sync::SyncOptions { transcript, wait_for_lock: std::time::Duration::ZERO };
-    let r = cctrack::sync::dry_run(paths, &creds, &opts, rescan, chrono::Utc::now());
+    let r = cctrack::sync::dry_run(paths, &creds, &opts, rescan, chrono::Utc::now())?;
     if let Some((mode, source)) = r.mode {
         let source = match source {
             cctrack::proxy::ModeSource::Env => "from CCTRACK_PROXY_MODE",
@@ -276,6 +279,9 @@ fn dry_run(paths: &Paths, transcript: Option<std::path::PathBuf>, rescan: bool) 
             cctrack::proxy::ModeSource::Default => "default",
         };
         println!("cctrack sync --dry-run: proxy mode {} ({source}); {} transcript files with new lines; nothing uploaded", mode.as_str(), r.files_read);
+    }
+    for w in &r.warnings {
+        println!("warning: {w}");
     }
     if r.sessions.is_empty() {
         println!("nothing to upload");
@@ -291,6 +297,9 @@ fn dry_run(paths: &Paths, transcript: Option<std::path::PathBuf>, rescan: bool) 
             Some(Ok(why)) => println!("  proxied: {why}"),
             Some(Err(why)) => println!("  not proxied: {why}"),
             None => {}
+        }
+        if let Some(note) = &s.looks_proxied {
+            println!("  note: {note}");
         }
         for ((account, how), n) in &s.accounts {
             println!("  {n} entries -> {account} ({how})");
@@ -318,6 +327,7 @@ fn upload(paths: &Paths, summary: &str, session: Option<String>) -> Result<ExitC
         .filter(|l| l.session_id == session_id)
         .and_then(|l| l.transcript_path)
         .map(std::path::PathBuf::from)
+        .filter(|p| p.is_file())
         .or_else(|| cctrack::scan::find_transcript(&paths.projects_dir(), &session_id));
 
     let client = ApiClient::new(&creds.server, Some(&creds.token));

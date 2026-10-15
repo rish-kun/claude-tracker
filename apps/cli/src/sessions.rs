@@ -1,6 +1,7 @@
 //! Per-session sync state (`sessions.json`), written only by syncs (under
 //! `sync.lock`): the titles seen in a transcript and the one last sent, the
-//! time range of usage uploaded, and pool accounts seen for proxied sessions.
+//! time range of usage uploaded, pool accounts seen for proxied sessions, and
+//! what the proxy log says about each session.
 //!
 //! Titles can sit in bytes an earlier sync already read, so the latest ones
 //! are kept here rather than re-read: a title changed later is still sent,
@@ -33,11 +34,58 @@ pub struct SessionState {
     pub first_ts: Option<DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_ts: Option<DateTime<Utc>>,
-    /// How many entries each pool auth file served (proxied sessions).
+    /// How many uploaded entries each pool auth file served (proxied
+    /// sessions; counted once the server accepted them).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub pool_auths: BTreeMap<String, u64>,
+    /// The pool auth file of the latest uploaded entry matched in the log
+    /// (CLIProxyAPI keeps a session on one account), and its timestamp.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_pool_auth: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_pool_at: Option<DateTime<Utc>>,
+    /// Of the uploaded entries compared with a proxy log, how many ran during
+    /// a request of a session with the same first character and model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub log_evidence: Option<LogEvidence>,
+    /// For a session without a hook record or `ANTHROPIC_BASE_URL`: whether
+    /// the proxy log showed it proxied. Decided once, then kept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inferred: Option<Inferred>,
+    /// Why the last sync credited this session to the Claude account rather
+    /// than a pool account (None when it was credited from a proxy log).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub not_proxied: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub touched_at: Option<DateTime<Utc>>,
+}
+
+/// Entries compared with a proxy log, and how many had a running request.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq)]
+pub struct LogEvidence {
+    pub matched: u64,
+    pub total: u64,
+}
+
+/// A decision inferred from the proxy log (see `proxy::infer`).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct Inferred {
+    pub proxied: bool,
+    pub matched: u64,
+    pub total: u64,
+    pub decided_at: DateTime<Utc>,
+}
+
+/// The auth with the highest count (ties: the alphabetically first, so the
+/// choice is stable).
+pub fn top_auth(counts: &BTreeMap<String, u64>) -> Option<&str> {
+    let mut best: Option<(&String, u64)> = None;
+    for (auth, &n) in counts {
+        if best.is_none_or(|(_, b)| n > b) {
+            best = Some((auth, n));
+        }
+    }
+    best.map(|(a, _)| a.as_str())
 }
 
 impl SessionState {
@@ -60,13 +108,23 @@ impl SessionState {
     /// The pool auth file that served most of this session (ties: the
     /// alphabetically first, so the choice is stable).
     pub fn top_pool_auth(&self) -> Option<&str> {
-        let mut best: Option<(&String, u64)> = None;
-        for (auth, &n) in &self.pool_auths {
-            if best.is_none_or(|(_, b)| n > b) {
-                best = Some((auth, n));
-            }
+        top_auth(&self.pool_auths)
+    }
+
+    /// Records an uploaded entry stamped `ts` that the log says `auth` served.
+    pub fn note_pool(&mut self, auth: &str, ts: DateTime<Utc>) {
+        *self.pool_auths.entry(auth.to_string()).or_default() += 1;
+        if self.last_pool_at.is_none_or(|t| ts >= t) {
+            self.last_pool_at = Some(ts);
+            self.last_pool_auth = Some(auth.to_string());
         }
-        best.map(|(a, _)| a.as_str())
+    }
+
+    /// Records an uploaded entry compared with a proxy log.
+    pub fn note_evidence(&mut self, had_request: bool) {
+        let e = self.log_evidence.get_or_insert_default();
+        e.total += 1;
+        e.matched += u64::from(had_request);
     }
 }
 
@@ -170,6 +228,22 @@ mod tests {
         s.pool_auths.insert("a.json".into(), 3);
         s.pool_auths.insert("c.json".into(), 1);
         assert_eq!(s.top_pool_auth(), Some("a.json"));
+    }
+
+    #[test]
+    fn pool_affinity_and_evidence() {
+        let mut st = SessionStates::default();
+        let t = now();
+        let s = st.touch("s", t);
+        s.note_pool("a.json", t);
+        s.note_pool("b.json", t - Duration::minutes(1)); // older: affinity stays with a
+        assert_eq!(s.last_pool_auth.as_deref(), Some("a.json"));
+        s.note_pool("b.json", t + Duration::minutes(1));
+        assert_eq!((s.last_pool_auth.as_deref(), s.last_pool_at), (Some("b.json"), Some(t + Duration::minutes(1))));
+        assert_eq!(s.pool_auths.get("b.json"), Some(&2));
+        s.note_evidence(true);
+        s.note_evidence(false);
+        assert_eq!(s.log_evidence, Some(LogEvidence { matched: 1, total: 2 }));
     }
 
     #[test]

@@ -7,16 +7,16 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use anyhow::{Result, anyhow, bail};
-use chrono::{DateTime, Local, TimeZone, Utc};
+use chrono::{DateTime, FixedOffset, Local, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::claude_json::{self, ClaudeState, OAuthAccount, UsageSnapshot};
 use crate::client::{ApiClient, ApiError};
 use crate::credentials::{self, Credentials};
 use crate::paths::Paths;
-use crate::proxy::{self, LogWindow, PoolResolver, ProxyMode, SessionProxy};
+use crate::proxy::{self, AuthCache, LogClock, PoolLog, PoolResolver, ProxyMode, SessionProxy, Verdict};
 use crate::scan::{self, Offsets, Position, TranscriptFile};
-use crate::sessions::{self, SessionStates};
+use crate::sessions::{self, Inferred, SessionStates};
 use crate::state::{lock_file, read_json, write_json_atomic};
 use crate::timeline::{self, Timeline};
 use crate::transcript::{self, TitleLine, UsageEntry};
@@ -50,6 +50,8 @@ pub struct SyncReport {
     pub quarantined: Vec<String>,
     /// Session titles sent on their own (without new usage).
     pub titles_sent: usize,
+    /// Title-only updates that failed (also in `sync.log`).
+    pub title_errors: Vec<String>,
 }
 
 /// Appends a timestamped line to `sync.log` (best effort).
@@ -139,6 +141,8 @@ pub struct PoolHit {
     /// Its auth file name in the proxy home.
     pub auth: String,
     pub how: PoolHow,
+    /// The auth file is gone: its identity came from the cache.
+    pub cached: bool,
 }
 
 /// Decides each entry's account: the pool account that served it when the
@@ -149,29 +153,44 @@ pub struct Attributor<'a> {
     pub claude: &'a ClaudeState,
     /// Pool accounts by message id.
     pub pool: HashMap<String, PoolHit>,
+    /// Entries of proxied sessions left with the Claude account because the
+    /// pool account the log names could not be identified, by message id: why.
+    pub notes: HashMap<String, String>,
 }
 
 impl<'a> Attributor<'a> {
     pub fn new(timeline: &'a Timeline, claude: &'a ClaudeState) -> Self {
-        Self { timeline, claude, pool: HashMap::new() }
+        Self { timeline, claude, pool: HashMap::new(), notes: HashMap::new() }
     }
 
     pub fn account(&self, e: &UsageEntry) -> IngestAccount {
-        self.explain(e).0
+        match self.pool.get(&e.message_id) {
+            Some(hit) => hit.account.clone(),
+            None => self.claude_account(e).0,
+        }
+    }
+
+    fn claude_account(&self, e: &UsageEntry) -> (IngestAccount, &'static str) {
+        match self.timeline.account_at(e.ts).unwrap_or(self.claude.account.as_ref()) {
+            Some(a) => (to_wire(a), "Claude account (~/.claude.json)"),
+            None => (api_key_account(), "API key"),
+        }
     }
 
     /// The account and how it was chosen.
-    pub fn explain(&self, e: &UsageEntry) -> (IngestAccount, &'static str) {
+    pub fn explain(&self, e: &UsageEntry) -> (IngestAccount, String) {
         if let Some(hit) = self.pool.get(&e.message_id) {
             let how = match hit.how {
                 PoolHow::Matched => "CLIProxyAPI log",
                 PoolHow::SessionUsual => "session's usual pool account",
             };
+            let how = if hit.cached { format!("{how}; auth file {} gone, identity from cache", hit.auth) } else { how.to_string() };
             return (hit.account.clone(), how);
         }
-        match self.timeline.account_at(e.ts).unwrap_or(self.claude.account.as_ref()) {
-            Some(a) => (to_wire(a), "Claude account (~/.claude.json)"),
-            None => (api_key_account(), "API key"),
+        let (account, how) = self.claude_account(e);
+        match self.notes.get(&e.message_id) {
+            Some(note) => (account, format!("{how}; {note}")),
+            None => (account, how.to_string()),
         }
     }
 }
@@ -313,6 +332,8 @@ struct Uploader<'a> {
     client: &'a ApiClient,
     device: Device,
     attr: &'a Attributor<'a>,
+    /// Per message id: whether the proxy log had a running request matching it.
+    evidence: &'a HashMap<String, bool>,
     /// Titles to send, by session id.
     titles: &'a BTreeMap<String, String>,
     states: SessionStates,
@@ -451,10 +472,12 @@ impl Uploader<'_> {
         Ok(())
     }
 
-    /// Records that the sessions of an accepted batch (minus any quarantined
-    /// meanwhile) were uploaded, with the titles attached to them.
-    fn note_accepted(&mut self, sent: &[(String, DateTime<Utc>)]) {
-        for (session_id, ts) in sent {
+    /// Records that the entries of an accepted batch (minus sessions
+    /// quarantined meanwhile) were uploaded: the titles attached to them, and
+    /// the pool accounts and proxy-log evidence of their entries (counted
+    /// only now, so a failed upload that is retried does not count twice).
+    fn note_accepted(&mut self, sent: &[(String, DateTime<Utc>, String)]) {
+        for (session_id, ts, message_id) in sent {
             if self.quarantine.contains(&self.scope, session_id) {
                 continue;
             }
@@ -462,7 +485,18 @@ impl Uploader<'_> {
             if let Some(t) = self.titles.get(session_id) {
                 self.states.touch(session_id, self.now).sent_title = Some(t.clone());
             }
+            if let Some(hit) = self.attr.pool.get(message_id).filter(|h| h.how == PoolHow::Matched) {
+                self.states.touch(session_id, self.now).note_pool(&hit.auth, *ts);
+            }
+            if let Some(&had) = self.evidence.get(message_id) {
+                self.states.touch(session_id, self.now).note_evidence(had);
+            }
         }
+    }
+
+    fn title_failed(&mut self, msg: String) {
+        log(self.paths, &msg);
+        self.report.title_errors.push(msg);
     }
 
     fn title_sent(&mut self, s: &IngestSession) {
@@ -495,20 +529,20 @@ impl Uploader<'_> {
                             Ok(_) => self.title_sent(s),
                             Err(e @ ApiError::Unauthorized(_)) => return Err(self.fatal(e)),
                             Err(e) if deterministic(&e).is_some() => {
-                                log(self.paths, &format!("title of session {} refused ({e}); not retried", s.session_id));
+                                self.title_failed(format!("title of session {} refused ({e}); not retried", s.session_id));
                                 if let Some(t) = &s.title {
                                     self.states.touch(&s.session_id, self.now).sent_title = Some(t.clone());
                                 }
                             }
                             Err(e) => {
-                                log(self.paths, &format!("title update failed ({e}); retrying next sync"));
+                                self.title_failed(format!("title update failed ({e}); retrying next sync"));
                                 return Ok(());
                             }
                         }
                     }
                 }
                 Err(e) => {
-                    log(self.paths, &format!("title update failed ({e}); retrying next sync"));
+                    self.title_failed(format!("title update failed ({e}); retrying next sync"));
                     return Ok(());
                 }
             }
@@ -577,9 +611,63 @@ fn scan_files(
     out
 }
 
+/// What the proxy logs say about one run's entries.
+#[derive(Default)]
+struct PoolOutcome {
+    hits: HashMap<String, PoolHit>,
+    /// Message ids left with the Claude account although their session is
+    /// proxied (the pool account named could not be identified): why.
+    notes: HashMap<String, String>,
+    /// Per message id compared with a proxy log: whether a request of a
+    /// session with the same first character and model was running then.
+    evidence: HashMap<String, bool>,
+    /// Per session: Ok(why) when attributed from a log, Err(why not).
+    decisions: BTreeMap<String, Result<String, String>>,
+    /// Sessions credited to the Claude account that look proxied: a note.
+    looks_proxied: BTreeMap<String, String>,
+    warnings: Vec<String>,
+    /// To save after a real (not dry) run.
+    auths: AuthCache,
+    clock: LogClock,
+}
+
+fn load_log<Tz: TimeZone>(dir: &Path, times: &[DateTime<Utc>], chars: &HashSet<char>, offset: Option<FixedOffset>, tz: &Tz) -> PoolLog {
+    let windows = proxy::read_windows(times);
+    match offset {
+        Some(o) => PoolLog::load_windows(dir, &windows, chars, &o),
+        None => PoolLog::load_windows(dir, &windows, chars, tz),
+    }
+}
+
+fn inferred_verdict(dir: PathBuf, inf: &Inferred, session_id: &str) -> Verdict {
+    let c = session_id.chars().next().unwrap_or('?');
+    let what = format!(
+        "{} of {} entries ran during a request of a session starting with '{c}' (no hook record and no ANTHROPIC_BASE_URL; decided {})",
+        inf.matched,
+        inf.total,
+        inf.decided_at.format("%Y-%m-%d %H:%M UTC")
+    );
+    if inf.proxied {
+        let log = dir.join(proxy::MAIN_LOG);
+        Verdict::Proxied(SessionProxy { why: format!("inferred from the proxy log: {what}; pool account read from {}", log.display()), dir })
+    } else {
+        Verdict::NotProxied {
+            why: format!("inferred from the proxy log as not proxied: only {what}, below {}%", proxy::INFER_PERCENT),
+            dir: Some(dir),
+        }
+    }
+}
+
 /// Per session, whether its usage is attributed from a CLIProxyAPI log, and
-/// the pool account of each entry so attributed (by message id). Session
-/// counts of pool accounts are kept in `states` for the fallback.
+/// the pool account of each entry so attributed (by message id).
+///
+/// Sessions with no hook record and no `ANTHROPIC_BASE_URL` are decided from
+/// the log ([`proxy::infer`]) and the decision is kept in `states`. Every
+/// session is compared with a log when one exists (not in mode off), to flag
+/// sessions that look proxied but are credited otherwise. When a session
+/// known to be proxied matches nothing, the log's clock is calibrated
+/// ([`proxy::calibrate`]). Pool account counts and affinity in `states` are
+/// only read here; they are updated once an upload is accepted.
 fn pool_attribution<Tz: TimeZone>(
     paths: &Paths,
     mode: ProxyMode,
@@ -587,51 +675,219 @@ fn pool_attribution<Tz: TimeZone>(
     states: &mut SessionStates,
     now: DateTime<Utc>,
     tz: &Tz,
-) -> (HashMap<String, PoolHit>, BTreeMap<String, Result<SessionProxy, String>>) {
+) -> PoolOutcome {
+    let mut out = PoolOutcome { auths: AuthCache::load(paths), clock: LogClock::load(paths), ..Default::default() };
     let mut cwd: HashMap<&str, &str> = HashMap::new();
     for e in entries {
         if let Some(c) = e.cwd.as_deref() {
             cwd.entry(&e.session_id).or_insert(c);
         }
     }
-    let mut decisions: BTreeMap<String, Result<SessionProxy, String>> = BTreeMap::new();
+    let mut verdicts: BTreeMap<String, Verdict> = BTreeMap::new();
     for e in entries {
-        if !decisions.contains_key(&e.session_id) {
-            let d = proxy::session_proxy(paths, mode, &e.session_id, cwd.get(e.session_id.as_str()).copied(), now);
-            decisions.insert(e.session_id.clone(), d);
+        if !verdicts.contains_key(&e.session_id) {
+            let v = proxy::session_verdict(paths, mode, &e.session_id, cwd.get(e.session_id.as_str()).copied(), now);
+            verdicts.insert(e.session_id.clone(), v);
         }
     }
-    let mut windows: BTreeMap<PathBuf, LogWindow> = BTreeMap::new();
-    for e in entries {
-        if let Some(Ok(sp)) = decisions.get(&e.session_id) {
-            windows.entry(sp.dir.clone()).or_default().include(&e.session_id, e.ts);
+    // Proxied per a hook record, settings or mode on: these calibrate a log's clock.
+    let known: HashSet<String> = verdicts.iter().filter(|(_, v)| matches!(v, Verdict::Proxied(_))).map(|(id, _)| id.clone()).collect();
+    // An earlier inference is kept.
+    for (id, v) in verdicts.iter_mut() {
+        if let Verdict::Infer { dir } = v
+            && let Some(inf) = states.get(id).and_then(|s| s.inferred.clone())
+        {
+            *v = inferred_verdict(dir.clone(), &inf, id);
         }
     }
-    let mut hits = HashMap::new();
-    if windows.is_empty() {
-        return (hits, decisions);
-    }
-    let mut resolver = PoolResolver::default();
-    resolver.load_logs(&windows, tz);
-    let mut unmatched = Vec::new();
+
+    // Which log each session's entries are compared with.
+    let log_dir = |v: &Verdict| match v {
+        Verdict::Proxied(sp) => Some(sp.dir.clone()),
+        Verdict::NotProxied { dir, .. } => dir.clone(),
+        Verdict::Infer { dir } => Some(dir.clone()),
+    };
+    let mut dirs: BTreeMap<PathBuf, (Vec<DateTime<Utc>>, HashSet<char>)> = BTreeMap::new();
+    let mut entry_dirs: Vec<(&UsageEntry, PathBuf)> = Vec::new();
     for e in entries {
-        let Some(Ok(sp)) = decisions.get(&e.session_id) else { continue };
-        let found = resolver.matched_auth(&sp.dir, &e.session_id, &e.model, e.ts);
-        match found.and_then(|auth| resolver.account(&sp.dir, &auth).map(|a| (auth, a))) {
-            Some((auth, account)) => {
-                *states.touch(&e.session_id, now).pool_auths.entry(auth.clone()).or_default() += 1;
-                hits.insert(e.message_id.clone(), PoolHit { account, auth, how: PoolHow::Matched });
+        let Some(dir) = verdicts.get(&e.session_id).and_then(log_dir) else { continue };
+        let (times, chars) = dirs.entry(dir.clone()).or_default();
+        times.push(e.ts);
+        if let Some(c) = e.session_id.chars().next() {
+            chars.insert(c.to_ascii_lowercase());
+        }
+        entry_dirs.push((e, dir));
+    }
+    let mut logs: HashMap<PathBuf, PoolLog> = HashMap::new();
+    for (dir, (times, chars)) in &dirs {
+        logs.insert(dir.clone(), load_log(dir, times, chars, out.clock.offset(dir), tz));
+    }
+    let evidence_for = |logs: &HashMap<PathBuf, PoolLog>, dir: &Path, out: &mut PoolOutcome| {
+        for (e, d) in &entry_dirs {
+            if d == dir {
+                let had = logs.get(d).is_some_and(|l| proxy::has_running_candidate(&l.selections, &e.session_id, &e.model, e.ts));
+                out.evidence.insert(e.message_id.clone(), had);
             }
-            None => unmatched.push((*e, sp.dir.clone())),
+        }
+    };
+    for dir in dirs.keys() {
+        evidence_for(&logs, dir, &mut out);
+    }
+
+    // A session known to be proxied whose entries all match nothing: the
+    // log's times may not be this machine's local time.
+    for (dir, (times, chars)) in &dirs {
+        let probes: Vec<&UsageEntry> =
+            entry_dirs.iter().filter(|(e, d)| d == dir && known.contains(&e.session_id)).map(|(e, _)| *e).collect();
+        let mut per_session: BTreeMap<&str, usize> = BTreeMap::new();
+        for e in &probes {
+            *per_session.entry(e.session_id.as_str()).or_default() += usize::from(out.evidence[&e.message_id]);
+        }
+        if !per_session.values().any(|&m| m == 0) || !out.clock.may_calibrate(dir, now) {
+            continue;
+        }
+        let current = probes.iter().filter(|e| out.evidence[&e.message_id]).count();
+        let wide: Vec<(DateTime<Utc>, DateTime<Utc>)> = proxy::read_windows(times)
+            .into_iter()
+            .map(|(f, t)| (f - chrono::Duration::hours(14), t + chrono::Duration::hours(14)))
+            .collect();
+        let naive = PoolLog::load_windows(dir, &wide, chars, &Utc);
+        let probe: Vec<(&str, &str, DateTime<Utc>)> = probes.iter().map(|e| (e.session_id.as_str(), e.model.as_str(), e.ts)).collect();
+        let found = proxy::calibrate(&naive.selections, &probe, current);
+        out.clock.record(dir, found, now);
+        if let Some((o, _)) = found {
+            logs.insert(dir.clone(), load_log(dir, times, chars, FixedOffset::east_opt(o * 60), tz));
+            evidence_for(&logs, dir, &mut out);
         }
     }
+    for (dir, log) in &logs {
+        if let Some(w) = out.clock.warning(dir) {
+            out.warnings.push(w);
+        }
+        if log.dst_ambiguous + log.dst_nonexistent > 0 {
+            out.warnings.push(format!(
+                "{} lines of {} have a local time repeated by a DST change and {} one skipped by it; they were read with the earliest valid UTC time",
+                log.dst_ambiguous,
+                dir.join(proxy::MAIN_LOG).display(),
+                log.dst_nonexistent
+            ));
+        }
+    }
+
+    // Evidence per session: earlier uploads plus this run.
+    let mut run_evidence: HashMap<&str, (u64, u64)> = HashMap::new();
+    for (e, _) in &entry_dirs {
+        let c = run_evidence.entry(e.session_id.as_str()).or_default();
+        c.0 += u64::from(out.evidence[&e.message_id]);
+        c.1 += 1;
+    }
+    let evidence = |states: &SessionStates, id: &str| {
+        let prior = states.get(id).and_then(|s| s.log_evidence).unwrap_or_default();
+        let (m, n) = run_evidence.get(id).copied().unwrap_or_default();
+        (prior.matched + m, prior.total + n)
+    };
+    for (id, v) in verdicts.iter_mut() {
+        let Verdict::Infer { dir } = v else { continue };
+        let (m, n) = evidence(states, id);
+        *v = match proxy::infer(m, n) {
+            Some(proxied) => {
+                let inf = Inferred { proxied, matched: m, total: n, decided_at: now };
+                states.touch(id, now).inferred = Some(inf.clone());
+                inferred_verdict(dir.clone(), &inf, id)
+            }
+            None => Verdict::NotProxied {
+                why: format!(
+                    "no hook record and no ANTHROPIC_BASE_URL, and only {n} entries so far ({} needed to infer from the proxy log); credited to the Claude account",
+                    proxy::INFER_MIN_ENTRIES
+                ),
+                dir: Some(dir.clone()),
+            },
+        };
+    }
+    for (id, v) in &verdicts {
+        match v {
+            Verdict::Proxied(sp) => {
+                out.decisions.insert(id.clone(), Ok(sp.why.clone()));
+                if mode != ProxyMode::Off {
+                    states.touch(id, now).not_proxied = None;
+                }
+            }
+            Verdict::NotProxied { why, dir } => {
+                out.decisions.insert(id.clone(), Err(why.clone()));
+                if mode == ProxyMode::Off {
+                    continue;
+                }
+                states.touch(id, now).not_proxied = Some(why.clone());
+                let (m, n) = evidence(states, id);
+                if dir.is_some() && proxy::infer(m, n) == Some(true) {
+                    out.looks_proxied.insert(
+                        id.clone(),
+                        format!("looks proxied: {m} of {n} entries ran during a matching request in the proxy log, but it is credited to the Claude account ({why})"),
+                    );
+                }
+            }
+            Verdict::Infer { .. } => {}
+        }
+    }
+
+    // Attribution, per session in time order (for affinity).
+    let mut resolver = PoolResolver::with_cache(std::mem::take(&mut out.auths));
+    let mut by_session: BTreeMap<&str, Vec<&UsageEntry>> = BTreeMap::new();
+    for e in entries {
+        if matches!(verdicts.get(&e.session_id), Some(Verdict::Proxied(_))) {
+            by_session.entry(e.session_id.as_str()).or_default().push(e);
+        }
+    }
+    let mut run_counts: HashMap<&str, BTreeMap<String, u64>> = HashMap::new();
+    let mut unmatched: Vec<(&UsageEntry, PathBuf)> = Vec::new();
+    for (id, mut es) in by_session {
+        let Some(Verdict::Proxied(sp)) = verdicts.get(id) else { continue };
+        let Some(log) = logs.get(&sp.dir) else { continue };
+        es.sort_by_key(|e| e.ts);
+        let mut affinity = states.get(id).and_then(|s| s.last_pool_auth.clone());
+        for e in es {
+            let Some(sel) = proxy::match_entry(&log.selections, id, &e.model, e.ts, affinity.as_deref()) else {
+                unmatched.push((e, sp.dir.clone()));
+                continue;
+            };
+            let auth = sel.auth.clone();
+            match resolver.resolve(&sp.dir, &auth) {
+                Some((account, cached)) => {
+                    *run_counts.entry(id).or_default().entry(auth.clone()).or_default() += 1;
+                    out.hits.insert(e.message_id.clone(), PoolHit { account, auth: auth.clone(), how: PoolHow::Matched, cached });
+                }
+                // Never another account's: the log says which one served it.
+                None => {
+                    out.notes.insert(
+                        e.message_id.clone(),
+                        format!("the proxy log names pool auth {auth}, whose auth file is gone and whose identity was never cached"),
+                    );
+                }
+            }
+            affinity = Some(auth);
+        }
+    }
+    // No log line: the pool account that served most of the session.
     for (e, dir) in unmatched {
-        let Some(auth) = states.get(&e.session_id).and_then(|s| s.top_pool_auth()).map(String::from) else { continue };
-        if let Some(account) = resolver.account(&dir, &auth) {
-            hits.insert(e.message_id.clone(), PoolHit { account, auth, how: PoolHow::SessionUsual });
+        let mut counts = states.get(&e.session_id).map(|s| s.pool_auths.clone()).unwrap_or_default();
+        for (auth, n) in run_counts.get(e.session_id.as_str()).into_iter().flatten() {
+            *counts.entry(auth.clone()).or_default() += n;
+        }
+        let Some(auth) = sessions::top_auth(&counts).map(String::from) else { continue };
+        match resolver.resolve(&dir, &auth) {
+            Some((account, cached)) => {
+                out.hits.insert(e.message_id.clone(), PoolHit { account, auth, how: PoolHow::SessionUsual, cached });
+            }
+            None => {
+                out.notes.insert(
+                    e.message_id.clone(),
+                    format!("no proxy log line matched, and the session's usual pool auth {auth} has no auth file and no cached identity"),
+                );
+            }
         }
     }
-    (hits, decisions)
+    out.auths = resolver.cache;
+    out
 }
 
 /// Titles to send, by session id: changed since last sent, not quarantined.
@@ -658,6 +914,14 @@ fn title_only(states: &SessionStates, titles: &BTreeMap<String, String>, with_us
         .collect()
 }
 
+/// A transcript named with `--transcript` must exist.
+fn check_transcript(opts: &SyncOptions) -> Result<()> {
+    match &opts.transcript {
+        Some(t) if !t.is_file() => bail!("no transcript at {}", t.display()),
+        _ => Ok(()),
+    }
+}
+
 fn files_to_scan(paths: &Paths, creds: &Credentials, opts: &SyncOptions) -> Vec<TranscriptFile> {
     match &opts.transcript {
         Some(t) => scan::session_files(t),
@@ -669,6 +933,7 @@ fn files_to_scan(paths: &Paths, creds: &Credentials, opts: &SyncOptions) -> Vec<
 }
 
 pub fn run(paths: &Paths, creds: &Credentials, client: &ApiClient, opts: &SyncOptions, now: DateTime<Utc>) -> Result<SyncReport> {
+    check_transcript(opts)?;
     let mut report = SyncReport::default();
     let Some(_lock) = lock_file(&paths.sync_lock(), opts.wait_for_lock)? else {
         report.skipped_locked = true;
@@ -697,11 +962,14 @@ pub fn run(paths: &Paths, creds: &Credentials, client: &ApiClient, opts: &SyncOp
 
     let all: Vec<&UsageEntry> = pending.iter().flat_map(|(_, _, es)| es.iter()).collect();
     let (pmode, _) = proxy::mode(paths, proxy::env_mode().as_deref());
-    let (pool, _) = pool_attribution(paths, pmode, &all, &mut states, now, &Local);
-    if !pool.is_empty() {
-        states.save(&paths.sessions(), now)?;
-    }
-    let attr = Attributor { timeline: &timeline, claude: &claude, pool };
+    let outcome = pool_attribution(paths, pmode, &all, &mut states, now, &Local);
+    // Inferred decisions and auth identities are kept now; pool account
+    // counts only once their upload is accepted.
+    states.save(&paths.sessions(), now)?;
+    outcome.auths.save(paths)?;
+    outcome.clock.save(paths)?;
+    let evidence = outcome.evidence;
+    let attr = Attributor { timeline: &timeline, claude: &claude, pool: outcome.hits, notes: outcome.notes };
     let titles = pending_titles(&states, &quarantine, &scope);
     let with_usage: HashSet<&str> = all.iter().map(|e| e.session_id.as_str()).collect();
     let title_updates = title_only(&states, &titles, &with_usage);
@@ -755,6 +1023,7 @@ pub fn run(paths: &Paths, creds: &Credentials, client: &ApiClient, opts: &SyncOp
         client,
         device: Device { hostname: hostname(), os: std::env::consts::OS.to_string() },
         attr: &attr,
+        evidence: &evidence,
         titles: &titles,
         states,
         now,
@@ -764,7 +1033,8 @@ pub fn run(paths: &Paths, creds: &Credentials, client: &ApiClient, opts: &SyncOp
     };
     for (i, batch) in batches.into_iter().enumerate() {
         let snap = if i == 0 { snapshot.as_ref() } else { None };
-        let sent: Vec<(String, DateTime<Utc>)> = batch.entries.iter().map(|e| (e.session_id.clone(), e.ts)).collect();
+        let sent: Vec<(String, DateTime<Utc>, String)> =
+            batch.entries.iter().map(|e| (e.session_id.clone(), e.ts, e.message_id.clone())).collect();
         up.send_batch(batch.entries, snap)?;
         // Every entry of this batch is now accepted or quarantined.
         up.note_accepted(&sent);
@@ -797,6 +1067,9 @@ pub struct DryRunSession {
     pub entries: usize,
     /// Ok(why) when attributed from a CLIProxyAPI log, Err(why not) otherwise.
     pub proxy: Option<Result<String, String>>,
+    /// Set when credited to the Claude account although its entries ran
+    /// during matching requests in the proxy log.
+    pub looks_proxied: Option<String>,
     /// Entries per (account label, how it was chosen).
     pub accounts: BTreeMap<(String, String), usize>,
 }
@@ -806,12 +1079,27 @@ pub struct DryRun {
     pub mode: Option<(ProxyMode, proxy::ModeSource)>,
     pub files_read: usize,
     pub sessions: Vec<DryRunSession>,
+    /// An invalid `CCTRACK_PROXY_MODE`, a calibrated proxy log clock, …
+    pub warnings: Vec<String>,
 }
 
 /// What a sync would upload, with each entry's account and why, without
 /// uploading or changing any state. With `rescan`, transcripts are read from
 /// the start (usage since login) instead of from the stored offsets.
-pub fn dry_run(paths: &Paths, creds: &Credentials, opts: &SyncOptions, rescan: bool, now: DateTime<Utc>) -> DryRun {
+pub fn dry_run(paths: &Paths, creds: &Credentials, opts: &SyncOptions, rescan: bool, now: DateTime<Utc>) -> Result<DryRun> {
+    dry_run_with(paths, creds, opts, rescan, proxy::env_mode().as_deref(), now)
+}
+
+/// [`dry_run`] with `env_mode` as the value of `CCTRACK_PROXY_MODE`.
+pub fn dry_run_with(
+    paths: &Paths,
+    creds: &Credentials,
+    opts: &SyncOptions,
+    rescan: bool,
+    env_mode: Option<&str>,
+    now: DateTime<Utc>,
+) -> Result<DryRun> {
+    check_transcript(opts)?;
     let timeline = Timeline::load(&paths.timeline());
     let claude = claude_json::read_checked(&paths.claude_json).unwrap_or_default();
     let files = files_to_scan(paths, creds, opts);
@@ -820,26 +1108,38 @@ pub fn dry_run(paths: &Paths, creds: &Credentials, opts: &SyncOptions, rescan: b
     let mut offsets = Offsets::load(&paths.offsets());
     let mut states = SessionStates::load(&paths.sessions());
     if rescan {
-        // As if nothing had been sent: every title is shown as pending.
-        states.sessions.values_mut().for_each(|s| s.sent_title = None);
+        // As if nothing had been sent: every title is shown as pending, and
+        // nothing counted from uploads (an inferred decision is kept).
+        for s in states.sessions.values_mut() {
+            s.sent_title = None;
+            s.pool_auths.clear();
+            s.last_pool_auth = None;
+            s.last_pool_at = None;
+            s.log_evidence = None;
+        }
     }
     let scanned = scan_files(&files, &mut offsets, rescan, creds, |id| quarantine.contains(&scope, id), &mut states, now);
     let all: Vec<&UsageEntry> = scanned.pending.iter().flat_map(|(_, _, es)| es.iter()).collect();
-    let mode = proxy::mode(paths, proxy::env_mode().as_deref());
-    let (pool, decisions) = pool_attribution(paths, mode.0, &all, &mut states, now, &Local);
-    let attr = Attributor { timeline: &timeline, claude: &claude, pool };
+    let mode = proxy::mode(paths, env_mode);
+    let outcome = pool_attribution(paths, mode.0, &all, &mut states, now, &Local);
+    let mut warnings: Vec<String> = proxy::mode_env_warning(env_mode).into_iter().collect();
+    warnings.extend(outcome.warnings);
+    let decisions = outcome.decisions;
+    let mut looks_proxied = outcome.looks_proxied;
+    let attr = Attributor { timeline: &timeline, claude: &claude, pool: outcome.hits, notes: outcome.notes };
     let titles = pending_titles(&states, &quarantine, &scope);
 
     let mut by_session: BTreeMap<String, DryRunSession> = BTreeMap::new();
     for e in &all {
         let s = by_session.entry(e.session_id.clone()).or_insert_with(|| DryRunSession {
             session_id: e.session_id.clone(),
-            proxy: decisions.get(&e.session_id).map(|d| d.as_ref().map(|p| p.why.clone()).map_err(Clone::clone)),
+            proxy: decisions.get(&e.session_id).cloned(),
+            looks_proxied: looks_proxied.remove(&e.session_id),
             ..Default::default()
         });
         s.entries += 1;
         let (account, how) = attr.explain(e);
-        *s.accounts.entry((account.email.unwrap_or(account.account_uuid), how.to_string())).or_default() += 1;
+        *s.accounts.entry((account.email.unwrap_or(account.account_uuid), how)).or_default() += 1;
     }
     let with_usage: HashSet<&str> = all.iter().map(|e| e.session_id.as_str()).collect();
     for u in title_only(&states, &titles, &with_usage) {
@@ -850,6 +1150,6 @@ pub fn dry_run(paths: &Paths, creds: &Credentials, opts: &SyncOptions, rescan: b
         s.title = st.and_then(|st| st.title()).map(String::from);
         s.title_pending = titles.contains_key(&s.session_id) && (s.entries > 0 || st.and_then(|st| st.uploaded_range()).is_some());
     }
-    DryRun { mode: Some(mode), files_read: scanned.files_read, sessions: by_session.into_values().collect() }
+    Ok(DryRun { mode: Some(mode), files_read: scanned.files_read, sessions: by_session.into_values().collect(), warnings })
 }
 

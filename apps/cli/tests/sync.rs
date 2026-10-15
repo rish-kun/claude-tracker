@@ -903,7 +903,7 @@ fn proxied_usage_is_credited_to_the_pool_account_that_served_it() {
     proxy_fixture(&fx);
 
     // Dry run first: same attribution, nothing uploaded or recorded.
-    let dry = sync::dry_run(&fx.paths, &fx.creds, &opts(), false, now());
+    let dry = sync::dry_run(&fx.paths, &fx.creds, &opts(), false, now()).unwrap();
     assert_eq!(dry.sessions.len(), 1);
     let s = &dry.sessions[0];
     assert_eq!(s.entries, 4);
@@ -957,11 +957,328 @@ fn proxied_session_without_a_log_keeps_the_claude_account() {
     let fx = fixture();
     proxy_fixture(&fx);
     fs::remove_file(fx.paths.cliproxy_dir.join("logs/main.log")).unwrap();
-    let dry = sync::dry_run(&fx.paths, &fx.creds, &opts(), false, now());
+    let dry = sync::dry_run(&fx.paths, &fx.creds, &opts(), false, now()).unwrap();
     assert!(matches!(&dry.sessions[0].proxy, Some(Err(why)) if why.contains("no CLIProxyAPI log")), "{:?}", dry.sessions[0].proxy);
     let (server, mock, bodies) = recording_server(1);
     let client = ApiClient::new(&server.url(), Some("cct_test"));
     sync::run(&fx.paths, &fx.creds, &client, &opts(), now()).unwrap();
     assert!(bodies.lock().unwrap()[0]["entries"].as_array().unwrap().iter().all(|e| e["account_uuid"] == "acc-1"));
     mock.assert();
+}
+
+// ---- QA round: pool attribution ----
+
+/// Pool auth files pool-a/pool-b in the proxy home (with secrets that must never leave).
+fn pool_home(fx: &Fixture) {
+    let dir = &fx.paths.cliproxy_dir;
+    fs::create_dir_all(dir.join("logs")).unwrap();
+    for (name, email, uuid) in [("pool-a.json", "a@pool.org", "pool-a-uuid"), ("pool-b.json", "b@pool.org", "pool-b-uuid")] {
+        fs::write(dir.join(name), format!(
+            r#"{{"type":"claude","email":"{email}","account_uuid":"{uuid}","organization_uuid":"org-{uuid}","access_token":"sk-ant-oat-SECRET","refresh_token":"sk-ant-ort-SECRET"}}"#
+        )).unwrap();
+    }
+}
+
+/// A request in the proxy log: (start, end, request id, session key, auth).
+type Req<'a> = (&'a str, Option<&'a str>, &'a str, &'a str, &'a str);
+
+/// Writes requests (model claude-opus-5-5) to `logs/<file>`, in time order,
+/// with times formatted by `fmt` (the proxy host's local time).
+fn write_log_as(fx: &Fixture, file: &str, reqs: &[Req], fmt: &dyn Fn(&str) -> String) {
+    let mut lines: Vec<(chrono::DateTime<Utc>, String)> = Vec::new();
+    let t = |s: &str| chrono::DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc);
+    for (start, end, req, session, auth) in reqs {
+        lines.push((t(start), format!(
+            "[{}] [{req}] [info ] [selector.go:1068] session-affinity: cache hit | session={session} auth={auth} provider=mixed model=claude-opus-5-5",
+            fmt(start)
+        )));
+        if let Some(end) = end {
+            lines.push((t(end), format!("[{}] [{req}] [info ] [gin_logger.go:108] 200 |  5s |  127.0.0.1 | POST \"/v1/messages?beta=true\"", fmt(end))));
+        }
+    }
+    lines.sort_by_key(|(t, _)| *t);
+    let body: String = lines.into_iter().map(|(_, l)| l + "\n").collect();
+    fs::write(fx.paths.cliproxy_dir.join("logs").join(file), body).unwrap();
+}
+
+fn write_log(fx: &Fixture, reqs: &[Req]) {
+    write_log_as(fx, "main.log", reqs, &local);
+}
+
+/// A transcript for `session` with opus entries at `times`.
+fn transcript(fx: &Fixture, session: &str, times: &[&str]) -> std::path::PathBuf {
+    let f = fx.paths.projects_dir().join(format!("-home-dev-{session}/{session}.jsonl"));
+    fs::create_dir_all(f.parent().unwrap()).unwrap();
+    let lines: Vec<String> = times.iter().enumerate().map(|(i, ts)| line_model(session, &format!("{session}_{i}"), ts, "claude-opus-5-5")).collect();
+    fs::write(&f, lines.join("\n") + "\n").unwrap();
+    f
+}
+
+fn accounts_by_message(body: &Value) -> std::collections::HashMap<String, String> {
+    body["entries"].as_array().unwrap().iter()
+        .map(|e| (e["message_id"].as_str().unwrap().to_string(), e["account_uuid"].as_str().unwrap().to_string()))
+        .collect()
+}
+
+fn all_accounts(bodies: &[Value]) -> std::collections::HashMap<String, String> {
+    bodies.iter().flat_map(accounts_by_message).collect()
+}
+
+fn session_state(fx: &Fixture, id: &str) -> Value {
+    let v: Value = serde_json::from_str(&fs::read_to_string(fx.paths.sessions()).unwrap()).unwrap();
+    v["sessions"][id].clone()
+}
+
+/// QA HIGH: a session started before the hooks (no record) and without
+/// ANTHROPIC_BASE_URL in any settings file was credited to the personal
+/// account forever. Now it is decided from the proxy log, and the decision kept.
+#[test]
+fn sessions_without_a_hook_record_are_inferred_from_the_proxy_log() {
+    use cctrack::proxy::{self, HookPoint, ProxyMode};
+    let fx = fixture();
+    pool_home(&fx);
+    write_log(&fx, &[
+        // The pre-hook proxied session 9c013753…: every response during one of its requests.
+        ("2026-10-01T10:00:00Z", Some("2026-10-01T10:00:21Z"), "p1", "claude:9...", "pool-a.json"),
+        ("2026-10-01T10:01:00Z", Some("2026-10-01T10:01:21Z"), "p2", "claude:9...", "pool-a.json"),
+        ("2026-10-01T10:02:00Z", Some("2026-10-01T10:02:21Z"), "p3", "claude:9...", "pool-a.json"),
+        ("2026-10-01T10:03:00Z", Some("2026-10-01T10:03:21Z"), "p4", "claude:9...", "pool-b.json"),
+        ("2026-10-01T10:04:00Z", Some("2026-10-01T10:04:21Z"), "p5", "claude:9...", "pool-b.json"),
+        // Only two entries so far: too few to tell.
+        ("2026-10-01T10:00:00Z", Some("2026-10-01T10:00:21Z"), "f1", "claude:2...", "pool-a.json"),
+        ("2026-10-01T10:01:00Z", Some("2026-10-01T10:01:21Z"), "f2", "claude:2...", "pool-a.json"),
+        // A session a hook saw without ANTHROPIC_BASE_URL, yet its responses match.
+        ("2026-10-01T10:00:00Z", Some("2026-10-01T10:00:21Z"), "e1", "claude:e...", "pool-a.json"),
+        ("2026-10-01T10:01:00Z", Some("2026-10-01T10:01:21Z"), "e2", "claude:e...", "pool-a.json"),
+        ("2026-10-01T10:02:00Z", Some("2026-10-01T10:02:21Z"), "e3", "claude:e...", "pool-a.json"),
+    ]);
+    transcript(&fx, "9c013753-pre", &["2026-10-01T10:00:20Z", "2026-10-01T10:01:20Z", "2026-10-01T10:02:20Z", "2026-10-01T10:03:20Z", "2026-10-01T10:04:20Z"]);
+    // A plain `cli` session: nothing of it in the log.
+    transcript(&fx, "1abc-plain", &["2026-10-01T10:00:20Z", "2026-10-01T10:01:20Z", "2026-10-01T10:02:20Z", "2026-10-01T10:03:20Z"]);
+    // Same first character as the proxied one, but never while a '9' request runs.
+    transcript(&fx, "9d00-plain", &["2026-10-01T10:30:00Z", "2026-10-01T10:40:00Z", "2026-10-01T10:50:00Z"]);
+    transcript(&fx, "2few", &["2026-10-01T10:00:20Z", "2026-10-01T10:01:20Z"]);
+    transcript(&fx, "e0hooked", &["2026-10-01T10:00:20Z", "2026-10-01T10:01:20Z", "2026-10-01T10:02:20Z"]);
+    proxy::record_session(&fx.paths, "e0hooked", None, None, HookPoint::SessionStart, ProxyMode::Auto, now());
+
+    let dry = sync::dry_run(&fx.paths, &fx.creds, &opts(), false, now()).unwrap();
+    let get = |id: &str| dry.sessions.iter().find(|s| s.session_id == id).unwrap();
+    let s = get("9c013753-pre");
+    assert!(matches!(&s.proxy, Some(Ok(why)) if why.contains("inferred from the proxy log") && why.contains("5 of 5")), "{:?}", s.proxy);
+    assert_eq!(s.accounts.get(&("a@pool.org".to_string(), "CLIProxyAPI log".to_string())), Some(&3));
+    assert_eq!(s.accounts.get(&("b@pool.org".to_string(), "CLIProxyAPI log".to_string())), Some(&2));
+    for id in ["1abc-plain", "9d00-plain"] {
+        let s = get(id);
+        assert!(matches!(&s.proxy, Some(Err(why)) if why.contains("inferred from the proxy log as not proxied")), "{id}: {:?}", s.proxy);
+        assert!(s.accounts.keys().all(|(a, _)| a == "shared@example.com"), "{id}: {:?}", s.accounts);
+        assert!(s.looks_proxied.is_none());
+    }
+    assert!(matches!(&get("2few").proxy, Some(Err(why)) if why.contains("only 2 entries")), "{:?}", get("2few").proxy);
+    let e = get("e0hooked");
+    assert!(matches!(&e.proxy, Some(Err(why)) if why.contains("ANTHROPIC_BASE_URL is not set")), "{:?}", e.proxy);
+    assert!(e.looks_proxied.as_deref().is_some_and(|n| n.contains("looks proxied: 3 of 3")), "{:?}", e.looks_proxied);
+    assert!(!fx.paths.sessions().exists(), "a dry run changes no state");
+
+    let (server, mock, bodies) = recording_server(1);
+    let client = ApiClient::new(&server.url(), Some("cct_test"));
+    sync::run(&fx.paths, &fx.creds, &client, &opts(), now()).unwrap();
+    let got = all_accounts(&bodies.lock().unwrap());
+    for i in 0..3 {
+        assert_eq!(got[&format!("9c013753-pre_{i}")], "pool-a-uuid");
+    }
+    assert_eq!(got["9c013753-pre_3"], "pool-b-uuid");
+    for id in ["1abc-plain_0", "9d00-plain_2", "2few_1", "e0hooked_0", "msg_1"] {
+        assert_eq!(got[id], "acc-1", "{id}");
+    }
+    mock.assert();
+    // The decisions are kept; too few entries decide nothing yet.
+    let st = session_state(&fx, "9c013753-pre");
+    assert_eq!((st["inferred"]["proxied"].as_bool(), st["inferred"]["matched"].as_u64()), (Some(true), Some(5)), "{st}");
+    assert_eq!(session_state(&fx, "1abc-plain")["inferred"]["proxied"], false);
+    assert!(session_state(&fx, "2few")["inferred"].is_null());
+    assert_eq!(session_state(&fx, "2few")["log_evidence"], serde_json::json!({ "matched": 2, "total": 2 }));
+    let status = proxy::status_report(&fx.paths, None, None, None, now());
+    assert!(status.contains("9c013753-pre [pool] decided"), "{status}");
+    assert!(status.contains("look proxied but were credited to the Claude account (1):\n  e0hooked: 3 of 3"), "{status}");
+
+    // Stable: a later response with no log line stays with the pool (the
+    // session's usual account), and the 2-entry session is decided once it has 3.
+    let pre = fx.paths.projects_dir().join("-home-dev-9c013753-pre/9c013753-pre.jsonl");
+    append(&pre, &(line_model("9c013753-pre", "late", "2026-10-01T11:00:00Z", "claude-opus-5-5") + "\n"));
+    let few = fx.paths.projects_dir().join("-home-dev-2few/2few.jsonl");
+    append(&few, &(line_model("2few", "2few_2", "2026-10-01T10:01:20.500Z", "claude-opus-5-5") + "\n"));
+    let dry = sync::dry_run(&fx.paths, &fx.creds, &opts(), false, now()).unwrap();
+    let s = dry.sessions.iter().find(|s| s.session_id == "9c013753-pre").unwrap();
+    assert!(matches!(&s.proxy, Some(Ok(why)) if why.contains("inferred from the proxy log")), "{:?}", s.proxy);
+    assert_eq!(s.accounts.get(&("a@pool.org".to_string(), "session's usual pool account".to_string())), Some(&1), "{:?}", s.accounts);
+    let s = dry.sessions.iter().find(|s| s.session_id == "2few").unwrap();
+    assert!(matches!(&s.proxy, Some(Ok(why)) if why.contains("3 of 3")), "{:?}", s.proxy);
+}
+
+/// QA MEDIUM repro: overlapping requests of two sessions sharing a first
+/// character on different pool accounts were both credited to pool-b.
+#[test]
+fn overlapping_sessions_with_the_same_first_char_get_their_own_pool_account() {
+    use cctrack::proxy::{self, HookPoint, ProxyMode};
+    let fx = fixture();
+    pool_home(&fx);
+    write_log(&fx, &[
+        ("2026-10-01T10:30:00Z", Some("2026-10-01T10:30:30Z"), "q5", "claude:c...", "pool-a.json"),
+        ("2026-10-01T10:30:20Z", Some("2026-10-01T10:30:40Z"), "q6", "claude:c...", "pool-b.json"),
+    ]);
+    for id in ["cccc0005-aaaa", "cccc0006-bbbb"] {
+        proxy::record_session(&fx.paths, id, None, Some("http://127.0.0.1:8317"), HookPoint::SessionStart, ProxyMode::Auto, now());
+    }
+    transcript(&fx, "cccc0005-aaaa", &["2026-10-01T10:30:29.500Z"]);
+    transcript(&fx, "cccc0006-bbbb", &["2026-10-01T10:30:39.500Z"]);
+    let (server, mock, bodies) = recording_server(1);
+    let client = ApiClient::new(&server.url(), Some("cct_test"));
+    sync::run(&fx.paths, &fx.creds, &client, &opts(), now()).unwrap();
+    let got = all_accounts(&bodies.lock().unwrap());
+    assert_eq!(got["cccc0005-aaaa_0"], "pool-a-uuid");
+    assert_eq!(got["cccc0006-bbbb_0"], "pool-b-uuid");
+    mock.assert();
+    // Affinity is recorded once accepted.
+    assert_eq!(session_state(&fx, "cccc0005-aaaa")["last_pool_auth"], "pool-a.json");
+}
+
+/// QA MEDIUM: a deleted or renamed auth file. Its cached identity is used;
+/// an auth that cannot be identified never borrows another account.
+#[test]
+fn deleted_auth_files_use_the_cached_identity_and_never_another_account() {
+    let fx = fixture();
+    proxy_fixture(&fx);
+    let (server, mock, _) = recording_server(1);
+    let client = ApiClient::new(&server.url(), Some("cct_test"));
+    sync::run(&fx.paths, &fx.creds, &client, &opts(), now()).unwrap();
+    mock.assert();
+    let cache = fs::read_to_string(fx.paths.proxy_auths()).unwrap();
+    assert!(cache.contains("pool-b-uuid") && cache.contains("b@pool.org") && !cache.contains("SECRET"), "{cache}");
+
+    // pool-b's auth file is deleted; later requests name it and one never seen.
+    fs::remove_file(fx.paths.cliproxy_dir.join("pool-b.json")).unwrap();
+    let mut log = fs::read_to_string(fx.paths.cliproxy_dir.join("logs/main.log")).unwrap();
+    for (start, end, req, auth) in [
+        ("2026-10-01T10:20:00Z", "2026-10-01T10:20:10Z", "r4", "pool-b.json"),
+        ("2026-10-01T10:30:00Z", "2026-10-01T10:30:10Z", "r5", "gone.json"),
+    ] {
+        log += &format!("[{}] [{req}] [info ] [selector.go:1068] session-affinity: cache hit but auth unavailable, reselected | session=claude:s... auth={auth} provider=mixed model=claude-opus-5-5\n", local(start));
+        log += &format!("[{}] [{req}] [info ] [gin_logger.go:108] 200 |  5s |  127.0.0.1 | POST \"/v1/messages?beta=true\"\n", local(end));
+    }
+    fs::write(fx.paths.cliproxy_dir.join("logs/main.log"), log).unwrap();
+    append(&fx.transcript, &(line_model("sess-1", "msg_5", "2026-10-01T10:20:09Z", "claude-opus-5-5") + "\n"));
+    append(&fx.transcript, &(line_model("sess-1", "msg_6", "2026-10-01T10:30:09Z", "claude-opus-5-5") + "\n"));
+
+    let dry = sync::dry_run(&fx.paths, &fx.creds, &opts(), false, now()).unwrap();
+    let s = &dry.sessions[0];
+    assert_eq!(s.accounts.get(&("b@pool.org".to_string(), "CLIProxyAPI log; auth file pool-b.json gone, identity from cache".to_string())), Some(&1), "{:?}", s.accounts);
+    let claude = s.accounts.iter().find(|((a, _), _)| a == "shared@example.com").unwrap();
+    assert!(claude.0.1.contains("gone.json") && claude.0.1.contains("never cached"), "{:?}", s.accounts);
+    assert_eq!(*claude.1, 1);
+
+    let (server, mock, bodies) = recording_server(1);
+    let client = ApiClient::new(&server.url(), Some("cct_test"));
+    sync::run(&fx.paths, &fx.creds, &client, &opts(), now()).unwrap();
+    let got = all_accounts(&bodies.lock().unwrap());
+    assert_eq!(got["msg_5"], "pool-b-uuid", "cached identity");
+    assert_eq!(got["msg_6"], "acc-1", "not the session's usual pool-b: the log names another auth");
+    mock.assert();
+}
+
+/// QA LOW-MED: pool account counts were saved before the upload, so a
+/// failed upload that was retried counted twice.
+#[test]
+fn pool_counts_are_kept_only_once_the_upload_is_accepted() {
+    let fx = fixture();
+    proxy_fixture(&fx);
+    let mut server = mockito::Server::new();
+    let failing = server.mock("POST", "/api/ingest").with_status(500).with_body(r#"{"error":"db down"}"#).expect(1).create();
+    let client = ApiClient::new(&server.url(), Some("cct_test"));
+    assert!(sync::run(&fx.paths, &fx.creds, &client, &opts(), now()).is_err());
+    failing.assert();
+    assert!(session_state(&fx, "sess-1")["pool_auths"].is_null(), "{}", session_state(&fx, "sess-1"));
+
+    let (server, mock, _) = recording_server(1);
+    let client = ApiClient::new(&server.url(), Some("cct_test"));
+    sync::run(&fx.paths, &fx.creds, &client, &opts(), now()).unwrap();
+    mock.assert();
+    let st = session_state(&fx, "sess-1");
+    assert_eq!(st["pool_auths"], serde_json::json!({ "pool-a.json": 1, "pool-b.json": 2 }), "{st}");
+    assert_eq!(st["last_pool_auth"], "pool-b.json");
+    assert_eq!(st["log_evidence"], serde_json::json!({ "matched": 2, "total": 4 }), "{st}");
+}
+
+/// QA LOW: the log is in the proxy host's local time, which may not be ours.
+#[test]
+fn a_proxy_log_in_another_time_zone_is_calibrated() {
+    use chrono::Offset;
+    use cctrack::proxy::{self, HookPoint, ProxyMode};
+    let fx = fixture();
+    pool_home(&fx);
+    let ours = chrono::Local.offset_from_utc_datetime(&now().naive_utc()).fix().local_minus_utc();
+    let theirs = chrono::FixedOffset::east_opt(if ours >= 0 { ours - 3 * 3600 } else { ours + 3 * 3600 }).unwrap();
+    let fmt = move |ts: &str| chrono::DateTime::parse_from_rfc3339(ts).unwrap().with_timezone(&theirs).format("%Y-%m-%d %H:%M:%S").to_string();
+    write_log_as(&fx, "main.log", &[
+        ("2026-10-01T10:00:00Z", Some("2026-10-01T10:00:21Z"), "t1", "claude:9...", "pool-a.json"),
+        ("2026-10-01T10:01:00Z", Some("2026-10-01T10:01:21Z"), "t2", "claude:9...", "pool-a.json"),
+        ("2026-10-01T10:02:00Z", Some("2026-10-01T10:02:21Z"), "t3", "claude:9...", "pool-b.json"),
+    ], &fmt);
+    proxy::record_session(&fx.paths, "9tz", None, Some("http://127.0.0.1:8317"), HookPoint::SessionStart, ProxyMode::Auto, now());
+    transcript(&fx, "9tz", &["2026-10-01T10:00:20Z", "2026-10-01T10:01:20Z", "2026-10-01T10:02:20Z"]);
+
+    let dry = sync::dry_run(&fx.paths, &fx.creds, &opts(), false, now()).unwrap();
+    let offset = cctrack::proxy::fmt_offset(theirs.local_minus_utc() / 60);
+    assert!(dry.warnings.iter().any(|w| w.contains(&format!("read as {offset}"))), "{:?}", dry.warnings);
+    let s = dry.sessions.iter().find(|s| s.session_id == "9tz").unwrap();
+    assert_eq!(s.accounts.get(&("a@pool.org".to_string(), "CLIProxyAPI log".to_string())), Some(&2), "{:?}", s.accounts);
+    assert_eq!(s.accounts.get(&("b@pool.org".to_string(), "CLIProxyAPI log".to_string())), Some(&1), "{:?}", s.accounts);
+    assert!(!fx.paths.proxy_log_clock().exists(), "a dry run changes no state");
+
+    let (server, mock, bodies) = recording_server(1);
+    let client = ApiClient::new(&server.url(), Some("cct_test"));
+    sync::run(&fx.paths, &fx.creds, &client, &opts(), now()).unwrap();
+    assert_eq!(all_accounts(&bodies.lock().unwrap())["9tz_2"], "pool-b-uuid");
+    mock.assert();
+    // Cached per log, and shown by status.
+    let status = proxy::status_report(&fx.paths, None, None, None, now());
+    assert!(status.contains(&format!("read as {offset} instead of this machine's local time")), "{status}");
+}
+
+#[test]
+fn a_missing_transcript_is_an_error() {
+    let fx = fixture();
+    let missing = SyncOptions { transcript: Some(fx.paths.projects_dir().join("nope/none.jsonl")), wait_for_lock: Duration::ZERO };
+    let client = ApiClient::new("http://127.0.0.1:9", Some("cct_test")); // never contacted
+    let err = sync::run(&fx.paths, &fx.creds, &client, &missing, now()).unwrap_err().to_string();
+    assert!(err.contains("no transcript at") && err.contains("none.jsonl"), "{err}");
+    assert!(sync::dry_run(&fx.paths, &fx.creds, &missing, false, now()).is_err());
+}
+
+#[test]
+fn dry_run_warns_about_an_invalid_proxy_mode_override() {
+    let fx = fixture();
+    let dry = sync::dry_run_with(&fx.paths, &fx.creds, &opts(), false, Some("maybe"), now()).unwrap();
+    assert!(dry.warnings.iter().any(|w| w.contains("ignoring CCTRACK_PROXY_MODE=\"maybe\"")), "{:?}", dry.warnings);
+    assert_eq!(dry.mode.unwrap().0, cctrack::proxy::ProxyMode::Auto);
+    let dry = sync::dry_run_with(&fx.paths, &fx.creds, &opts(), false, Some("off"), now()).unwrap();
+    assert!(dry.warnings.is_empty(), "{:?}", dry.warnings);
+}
+
+#[test]
+fn failed_title_updates_are_reported() {
+    let fx = fixture();
+    append(&fx.transcript, "\n{\"type\":\"ai-title\",\"aiTitle\":\"First\",\"sessionId\":\"sess-1\"}\n");
+    let (server, mock, _) = recording_server(1);
+    let client = ApiClient::new(&server.url(), Some("cct_test"));
+    sync::run(&fx.paths, &fx.creds, &client, &opts(), now()).unwrap();
+    mock.assert();
+    append(&fx.transcript, "{\"type\":\"custom-title\",\"customTitle\":\"Renamed\",\"sessionId\":\"sess-1\"}\n");
+    let mut server = mockito::Server::new();
+    let down = server.mock("POST", "/api/ingest").with_status(500).with_body(r#"{"error":"db down"}"#).expect(1).create();
+    let client = ApiClient::new(&server.url(), Some("cct_test"));
+    let report = sync::run(&fx.paths, &fx.creds, &client, &opts(), now()).unwrap();
+    down.assert();
+    assert_eq!(report.titles_sent, 0);
+    assert!(report.title_errors.len() == 1 && report.title_errors[0].contains("title update failed"), "{:?}", report.title_errors);
+    assert!(fs::read_to_string(fx.paths.sync_log()).unwrap().contains("title update failed"));
 }

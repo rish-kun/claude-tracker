@@ -82,6 +82,11 @@ impl Paths {
     /// Markers of sessions that run through a local CLIProxyAPI pool, one
     /// file per session (written by hooks, read by syncs).
     pub fn proxy_sessions_dir(&self) -> PathBuf { self.state_dir.join("proxy-sessions") }
+    /// Identities (non-secret fields only) of pool auth files read so far,
+    /// by file name, for when a file is deleted or renamed. Written by syncs.
+    pub fn proxy_auths(&self) -> PathBuf { self.state_dir.join("proxy-auths.json") }
+    /// Calibrated UTC offsets of proxy logs not in local time. Written by syncs.
+    pub fn proxy_log_clock(&self) -> PathBuf { self.state_dir.join("proxy-log-clock.json") }
 
     /// Stable short key for the Claude config dir: the first 6 bytes of
     /// sha256 of the `.claude.json` path, as hex.
