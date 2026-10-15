@@ -33,7 +33,7 @@ If the session context, a blocked prompt, or a denied tool says cctrack is
   signed in. Use the exact command shown in the cctrack message (it names the
   full path of the cctrack binary); any other spelling is denied.
 - If `cctrack` is not installed, tell the user to install it
-  (`cargo install --path apps/cli` from the cctrack repo) and stop.
+  (download the binary from the cctrack GitHub Releases into `~/.local/bin`, see `docs/setup.md`) and stop.
 
 An admin can revoke a login from the dashboard. That takes effect at the next
 session start (checked online with a 2-second limit) or the next sync, and from

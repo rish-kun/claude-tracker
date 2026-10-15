@@ -1,0 +1,327 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Set up cctrack</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Schibsted+Grotesk:wght@400;500;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --paper: #f5f6f8;
+    --ink: #17202b;
+    --muted: #5a6574;
+    --rule: #d8dde4;
+    --meter: #3346c9;
+    --done: #1e7b4f;
+    --code-bg: #e9ecf1;
+    --sans: "Schibsted Grotesk", system-ui, -apple-system, sans-serif;
+    --mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  }
+  * { box-sizing: border-box; }
+  html { background: var(--paper); color: var(--ink); font: 17px/1.55 var(--sans); }
+  body { margin: 0; }
+  a { color: var(--meter); }
+  :focus-visible { outline: 2px solid var(--meter); outline-offset: 2px; border-radius: 3px; }
+
+  /* The one bold element: a plan-limit style meter that fills as setup gets done. */
+  .meter {
+    position: sticky; top: 0; z-index: 2;
+    background: color-mix(in srgb, var(--paper) 92%, transparent);
+    backdrop-filter: blur(6px);
+    border-bottom: 1px solid var(--rule);
+  }
+  .meter-inner { max-width: 760px; margin: 0 auto; padding: 14px 24px 16px; }
+  .meter-text { display: flex; justify-content: space-between; gap: 16px; font-size: 15px; margin-bottom: 8px; }
+  .meter-text strong { font-weight: 500; }
+  .meter-text span { color: var(--muted); font-variant-numeric: tabular-nums; }
+  .track { height: 10px; border-radius: 5px; background: var(--rule); overflow: hidden; }
+  .fill { height: 100%; width: 0; background: var(--meter); border-radius: 5px; transition: width .4s cubic-bezier(.2,.7,.2,1), background-color .4s; }
+  .meter.complete .fill { background: var(--done); }
+  @media (prefers-reduced-motion: reduce) { .fill { transition: none; } }
+
+  main { max-width: 760px; margin: 0 auto; padding: 56px 24px 96px; }
+  h1 { font-size: 44px; line-height: 1.1; letter-spacing: -0.02em; font-weight: 700; margin: 0 0 14px; }
+  .lede { color: var(--muted); max-width: 60ch; margin: 0 0 40px; }
+  h2 { font-size: 24px; letter-spacing: -0.01em; margin: 64px 0 6px; }
+  h2 + p { color: var(--muted); margin: 0 0 20px; }
+
+  /* Values the commands below are filled in from. */
+  .fields { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); padding: 20px; border: 1px solid var(--rule); border-radius: 10px; background: #fff; }
+  .fields label { display: grid; gap: 4px; font-size: 14px; color: var(--muted); }
+  .fields input, .fields select {
+    font: 15px var(--sans); color: var(--ink);
+    padding: 8px 10px; border: 1px solid var(--rule); border-radius: 6px; background: var(--paper); width: 100%;
+  }
+
+  ol.steps { list-style: none; margin: 0; padding: 0; counter-reset: step var(--start, 0); }
+  ol.steps > li { counter-increment: step; position: relative; padding: 22px 0 22px 56px; border-top: 1px solid var(--rule); }
+  ol.steps > li:last-child { border-bottom: 1px solid var(--rule); }
+  .check { position: absolute; left: 0; top: 22px; }
+  .check input { position: absolute; opacity: 0; width: 32px; height: 32px; margin: 0; cursor: pointer; }
+  .check span {
+    display: grid; place-items: center; width: 32px; height: 32px; border-radius: 50%;
+    border: 1.5px solid var(--ink); font-weight: 500; font-size: 15px; font-variant-numeric: tabular-nums;
+    pointer-events: none;
+  }
+  .check span::before { content: counter(step); }
+  .check input:checked + span { background: var(--done); border-color: var(--done); color: #fff; }
+  .check input:checked + span::before { content: "✓"; }
+  .check input:focus-visible + span { outline: 2px solid var(--meter); outline-offset: 2px; }
+  li.is-done h3, li.is-done > p { color: var(--muted); }
+  h3 { font-size: 19px; margin: 3px 0 6px; font-weight: 500; }
+  li p { margin: 0 0 10px; max-width: 64ch; }
+  li ul { margin: 0 0 10px; padding-left: 20px; }
+  li ul li { margin-bottom: 4px; }
+
+  code { font: 0.86em var(--mono); background: var(--code-bg); padding: 1px 5px; border-radius: 4px; }
+  .cmd { position: relative; margin: 10px 0 12px; }
+  .cmd pre {
+    margin: 0; padding: 14px 84px 14px 16px; background: var(--ink); color: #e7ebf1;
+    border-radius: 8px; overflow-x: auto; font: 14px/1.6 var(--mono);
+  }
+  .cmd pre code { font: inherit; color: inherit; background: none; padding: 0; border-radius: 0; }
+  .copy {
+    position: absolute; top: 8px; right: 8px;
+    font: 500 13px var(--sans); color: #e7ebf1; background: #2c3846;
+    border: 0; border-radius: 5px; padding: 5px 10px; cursor: pointer;
+  }
+  .copy:hover { background: #3a4757; }
+  .b { font-family: var(--mono); font-size: .86em; background: #e4e8fb; color: #24339a; padding: 1px 5px; border-radius: 4px; }
+  .cmd pre .b { background: #2b3a8a; color: #dfe5ff; font-size: 1em; }
+
+  table { border-collapse: collapse; width: 100%; font-size: 15px; margin: 8px 0 12px; }
+  th, td { text-align: left; padding: 8px 10px 8px 0; border-bottom: 1px solid var(--rule); vertical-align: top; }
+  th { font-weight: 500; color: var(--muted); }
+  td:first-child { white-space: nowrap; }
+  #f-platform { font: 15px var(--sans); color: var(--ink); padding: 4px 8px; border: 1px solid var(--rule); border-radius: 6px; background: #fff; margin-left: 4px; }
+  .gen { font: 500 13px var(--sans); border: 1px solid var(--rule); background: #fff; border-radius: 5px; padding: 3px 9px; cursor: pointer; margin-left: 6px; }
+
+  details { margin-top: 40px; border: 1px solid var(--rule); border-radius: 10px; padding: 16px 20px; background: #fff; }
+  summary { cursor: pointer; font-weight: 500; }
+  details[open] summary { margin-bottom: 10px; }
+  .note { font-size: 15px; color: var(--muted); }
+
+  @media (max-width: 560px) {
+    html { font-size: 16px; }
+    h1 { font-size: 34px; }
+    ol.steps > li { padding-left: 46px; }
+    td:first-child { white-space: normal; }
+  }
+</style>
+</head>
+<body>
+
+<div class="meter" id="meter">
+  <div class="meter-inner">
+    <div class="meter-text"><strong id="meter-label">Setup not started</strong><span id="meter-count">0 of 0</span></div>
+    <div class="track" role="progressbar" aria-labelledby="meter-label" aria-valuemin="0" id="track"><div class="fill" id="fill"></div></div>
+  </div>
+</div>
+
+<main>
+  <h1>Set up cctrack</h1>
+  <p class="lede">cctrack shows how much of each shared Claude plan every teammate uses. You deploy the dashboard once; each teammate then installs a small CLI and the Claude Code plugin. Tick each step as you finish it. Your progress stays in this browser.</p>
+
+  <form class="fields" id="fields" autocomplete="off" onsubmit="return false">
+    <label>Dashboard address
+      <input id="f-url" placeholder="https://claude-tracker-inky.vercel.app" inputmode="url">
+    </label>
+    <label>GitHub repo
+      <input id="f-repo" placeholder="rish-kun/claude-tracker">
+    </label>
+    <label>Your Google email (admin)
+      <input id="f-email" placeholder="you@example.com" inputmode="email">
+    </label>
+  </form>
+
+  <h2>You, once</h2>
+  <p>About 20 minutes. You need accounts on Google Cloud, Neon and Vercel.</p>
+  <ol class="steps" style="--start:0">
+    <li>
+      <label class="check"><input type="checkbox" data-step="release"><span></span></label>
+      <h3>Publish the CLI downloads</h3>
+      <p>Merge the standalone CLI changes into <code>main</code>, then push a version tag. GitHub builds the CLI for macOS and Linux and attaches it to a release.</p>
+      <div class="cmd"><pre><code>git tag cli-v0.1.0 &amp;&amp; git push origin cli-v0.1.0</code></pre></div>
+    </li>
+    <li>
+      <label class="check"><input type="checkbox" data-step="db"><span></span></label>
+      <h3>Get the database connection strings</h3>
+      <p>In Neon, open your project and copy two connection strings: the <strong>pooled</strong> one (host contains <code>-pooler</code>) and the <strong>direct</strong> one. If you use the Neon project already linked to this repo, both are in <code>.env.local</code> as <code>DATABASE_URL</code> and <code>DATABASE_URL_UNPOOLED</code>.</p>
+    </li>
+    <li>
+      <label class="check"><input type="checkbox" data-step="google"><span></span></label>
+      <h3>Create the Google sign-in client</h3>
+      <p>In Google Cloud Console, go to APIs &amp; Services, then Credentials, and create an OAuth client ID of type <strong>Web application</strong> with this redirect URI:</p>
+      <div class="cmd"><pre><code><span class="b" data-bind="url">https://claude-tracker-inky.vercel.app</span>/api/auth/google/callback</code></pre></div>
+      <ul>
+        <li>Keep the client ID and secret for step 5.</li>
+        <li>Google Workspace: set the consent screen to <strong>Internal</strong>. Personal Gmail accounts: publish the app, or add each teammate as a test user.</li>
+      </ul>
+    </li>
+    <li>
+      <label class="check"><input type="checkbox" data-step="vercel"><span></span></label>
+      <h3>Create the Vercel project</h3>
+      <p>Import <span class="b" data-bind="repo">rish-kun/claude-tracker</span> into Vercel. In Settings, then Build and Deployment, set Framework Preset to <strong>Services</strong> and leave Root Directory empty. The dashboard address above must be the domain this project serves.</p>
+    </li>
+    <li>
+      <label class="check"><input type="checkbox" data-step="env"><span></span></label>
+      <h3>Add the environment variables</h3>
+      <p>Paste this into Vercel's environment variables, then fill in the empty values.</p>
+      <div class="cmd"><pre><code id="env-block">DATABASE_URL=
+DATABASE_URL_UNPOOLED=
+GOOGLE_CLIENT_ID=
+GOOGLE_CLIENT_SECRET=
+SESSION_SECRET=<span class="b" data-bind="secret"></span>
+PUBLIC_URL=<span class="b" data-bind="url">https://claude-tracker-inky.vercel.app</span>
+ADMIN_EMAILS=<span class="b" data-bind="email">you@example.com</span>
+ALLOWED_DOMAINS=
+ALLOWED_EMAILS=
+AUTO_MIGRATE=true</code></pre></div>
+      <table>
+        <tr><th>Variable</th><th>What to put</th></tr>
+        <tr><td><code>SESSION_SECRET</code></td><td>A random string, made in this browser. <button type="button" class="gen" id="regen">Make a new one</button></td></tr>
+        <tr><td><code>ALLOWED_DOMAINS</code></td><td>Your Workspace domain, like <code>example.com</code>, so anyone in it can sign in.</td></tr>
+        <tr><td><code>ALLOWED_EMAILS</code></td><td>Individual addresses, comma-separated. Set this one, <code>ALLOWED_DOMAINS</code>, or both. With neither, the server won't start.</td></tr>
+        <tr><td><code>ADMIN_EMAILS</code></td><td>People who can see everyone's usage.</td></tr>
+      </table>
+    </li>
+    <li>
+      <label class="check"><input type="checkbox" data-step="deploy"><span></span></label>
+      <h3>Deploy and sign in</h3>
+      <p>Deploy, open <span class="b" data-bind="url">https://claude-tracker-inky.vercel.app</span> and sign in with your admin email. After teammates start syncing, each Claude account shows up in <strong>Settings</strong>. Give each one a name and choose its plan, so limits and costs are measured correctly.</p>
+    </li>
+  </ol>
+
+  <h2>Each teammate</h2>
+  <p>About 5 minutes per machine. Send them this page, with the fields above filled in.</p>
+  <ol class="steps" style="--start:6">
+    <li>
+      <label class="check"><input type="checkbox" data-step="access"><span></span></label>
+      <h3>Get access</h3>
+      <p>Each teammate needs read access to <span class="b" data-bind="repo">rish-kun/claude-tracker</span> on GitHub, and Claude Code 2.1.295 or later.</p>
+    </li>
+    <li>
+      <label class="check"><input type="checkbox" data-step="cli"><span></span></label>
+      <h3>Install the CLI</h3>
+      <p>It's a single file that needs nothing else installed. Choose your machine:
+        <select id="f-platform" aria-label="Machine">
+          <option value="aarch64-apple-darwin">Mac with Apple silicon</option>
+          <option value="x86_64-apple-darwin">Mac with Intel</option>
+          <option value="x86_64-unknown-linux-musl">Linux x86_64</option>
+          <option value="aarch64-unknown-linux-musl">Linux arm64</option>
+        </select>
+      </p>
+      <div class="cmd"><pre><code>gh release download --repo <span class="b" data-bind="repo">rish-kun/claude-tracker</span> --pattern 'cctrack-<span class="b" data-bind="platform">aarch64-apple-darwin</span>.tar.gz'
+mkdir -p ~/.local/bin
+tar -xzf cctrack-<span class="b" data-bind="platform">aarch64-apple-darwin</span>.tar.gz -C ~/.local/bin</code></pre></div>
+      <p class="note">If you don't have <code>gh</code>, download the file from the repo's Releases page instead. Files downloaded in a browser on a Mac also need <code>xattr -d com.apple.quarantine ~/.local/bin/cctrack</code>.</p>
+    </li>
+    <li>
+      <label class="check"><input type="checkbox" data-step="login"><span></span></label>
+      <h3>Sign in</h3>
+      <p>This opens the browser to sign in with Google. On a machine without a browser, add <code>--paste</code>.</p>
+      <div class="cmd"><pre><code>~/.local/bin/cctrack login --server <span class="b" data-bind="url">https://claude-tracker-inky.vercel.app</span>
+~/.local/bin/cctrack status</code></pre></div>
+    </li>
+    <li>
+      <label class="check"><input type="checkbox" data-step="plugin"><span></span></label>
+      <h3>Add the Claude Code plugin</h3>
+      <p>Run these inside Claude Code. From then on, Claude Code won't start work until you're signed in, and it uploads usage after each turn.</p>
+      <div class="cmd"><pre><code>/plugin marketplace add <span class="b" data-bind="repo">rish-kun/claude-tracker</span>
+/plugin install cctrack@cctrack</code></pre></div>
+    </li>
+  </ol>
+
+  <details>
+    <summary>Optional: make the plugin mandatory</summary>
+    <p>With admin rights on a machine, save this as <code>/Library/Application Support/ClaudeCode/managed-settings.json</code> (macOS) or <code>/etc/claude-code/managed-settings.json</code> (Linux). The plugin is then always on, and teammates can't turn it off.</p>
+    <div class="cmd"><pre><code>{
+  "extraKnownMarketplaces": {
+    "cctrack": { "source": { "source": "github", "repo": "<span class="b" data-bind="repo">rish-kun/claude-tracker</span>" } }
+  },
+  "enabledPlugins": { "cctrack@cctrack": true }
+}</code></pre></div>
+  </details>
+</main>
+
+<script>
+  const store = {
+    get(k, d) { try { return JSON.parse(localStorage.getItem("cctrack-setup:" + k)) ?? d; } catch { return d; } },
+    set(k, v) { try { localStorage.setItem("cctrack-setup:" + k, JSON.stringify(v)); } catch {} },
+  };
+
+  // Fields fill in every command that mentions them.
+  const fields = {
+    url: { el: document.getElementById("f-url"), fallback: "https://claude-tracker-inky.vercel.app", clean: (v) => v.trim().replace(/\/+$/, "") },
+    repo: { el: document.getElementById("f-repo"), fallback: "rish-kun/claude-tracker", clean: (v) => v.trim() },
+    email: { el: document.getElementById("f-email"), fallback: "you@example.com", clean: (v) => v.trim() },
+    platform: { el: document.getElementById("f-platform"), fallback: "aarch64-apple-darwin", clean: (v) => v },
+  };
+  function bind(name, value) {
+    document.querySelectorAll(`[data-bind="${name}"]`).forEach((n) => { n.textContent = value; });
+  }
+  for (const [name, f] of Object.entries(fields)) {
+    f.el.value = store.get(name, f.el.tagName === "SELECT" ? f.fallback : "");
+    const update = () => { store.set(name, f.el.value); bind(name, f.clean(f.el.value) || f.fallback); };
+    f.el.addEventListener("input", update);
+    update();
+  }
+
+  function newSecret() {
+    const bytes = crypto.getRandomValues(new Uint8Array(48));
+    const secret = btoa(String.fromCharCode(...bytes));
+    store.set("secret", secret);
+    bind("secret", secret);
+  }
+  document.getElementById("regen").addEventListener("click", newSecret);
+  const saved = store.get("secret", "");
+  saved ? bind("secret", saved) : newSecret();
+
+  // Steps and the meter.
+  const boxes = [...document.querySelectorAll("[data-step]")];
+  const done = new Set(store.get("done", []));
+  function render() {
+    const n = boxes.filter((b) => b.checked).length, total = boxes.length;
+    document.getElementById("fill").style.width = (n / total) * 100 + "%";
+    document.getElementById("meter-count").textContent = `${n} of ${total}`;
+    document.getElementById("meter-label").textContent =
+      n === 0 ? "Setup not started" : n === total ? "Everything is set up" : `Setup ${Math.round((n / total) * 100)}% done`;
+    document.getElementById("meter").classList.toggle("complete", n === total);
+    const track = document.getElementById("track");
+    track.setAttribute("aria-valuemax", total);
+    track.setAttribute("aria-valuenow", n);
+    boxes.forEach((b) => b.closest("li").classList.toggle("is-done", b.checked));
+  }
+  boxes.forEach((b) => {
+    b.setAttribute("aria-label", "Done: " + b.closest("li").querySelector("h3").textContent);
+    b.checked = done.has(b.dataset.step);
+    b.addEventListener("change", () => {
+      b.checked ? done.add(b.dataset.step) : done.delete(b.dataset.step);
+      store.set("done", [...done]);
+      render();
+    });
+  });
+  render();
+
+  // Copy buttons copy exactly what the block shows, with filled-in values.
+  document.querySelectorAll(".cmd").forEach((block) => {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "copy";
+    btn.textContent = "Copy";
+    btn.addEventListener("click", async () => {
+      try {
+        await navigator.clipboard.writeText(block.querySelector("code").textContent);
+        btn.textContent = "Copied";
+      } catch {
+        btn.textContent = "Select and copy";
+      }
+      setTimeout(() => { btn.textContent = "Copy"; }, 1500);
+    });
+    block.appendChild(btn);
+  });
+</script>
+</body>
+</html>
