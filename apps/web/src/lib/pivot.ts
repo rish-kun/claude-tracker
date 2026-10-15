@@ -116,3 +116,8 @@ export function chartSummary(title: string, p: Pivot, format: (n: number) => str
   const top = rowTotal(p, best)
   return top > 0 ? `${title}, ${span}. Highest day ${day(String(best.date))}, ${format(top)}.` : `${title}, ${span}. Nothing in this range.`
 }
+
+/** Replaces series labels using `label(key)` where it returns a value (e.g. names instead of emails). */
+export function relabel(p: Pivot, label: (key: string) => string | undefined): Pivot {
+  return { ...p, keys: p.keys.map((k) => ({ ...k, label: label(k.key) ?? k.label })) }
+}

@@ -1,15 +1,19 @@
-import { useState } from 'react'
-import type { Account, ModelPrice, Plan } from '../api/client'
+import { Link } from '@tanstack/react-router'
+import { useEffect, useId, useState } from 'react'
+import type { Account, ApiToken, ModelPrice, Plan } from '../api/client'
 import { useAccounts, usePrices, usePutPrice, useRevokeToken, useTokens, useUpdateAccount, useUsers } from '../api/hooks'
 import { AdminOnly } from '../components/AdminOnly'
-import { accountConflict, accountDirty, accountDraft, type AccountDraft, type AccountFields, syncAccountDraft } from '../lib/accounts'
-import { formatDateTime, PLAN_LABELS, PLANS } from '../lib/format'
+import { PageHeader } from '../components/Layout'
+import { Button, ConfirmButton, ErrorNotice, Glyph, Notice, Section, SkeletonRows, useDisclosure } from '../components/ui'
+import { accountConflict, accountDirty, accountDraft, type AccountDraft, type AccountFields, suggestPlan, syncAccountDraft } from '../lib/accounts'
+import { formatDayLong, formatRelative, PLAN_LABELS, PLANS } from '../lib/format'
 import {
   addPriceError,
   BASE_RATE_FIELDS,
   EMPTY_DRAFT,
   modelError,
   parseDraft,
+  parseRate,
   type RateDraft,
   rowConflict,
   rowDirty,
@@ -17,9 +21,44 @@ import {
   type RowDraft,
   syncRowDraft,
 } from '../lib/prices'
+import { useNow } from '../lib/rangeContext'
 
-function AccountRow({ a }: { a: Account }) {
+const SAVED_MS = 2000
+const WEEK_MS = 7 * 86_400_000
+
+/** Shows "Saved" for two seconds after `mark()`. */
+function useSavedFlash(): [boolean, () => void] {
+  const [at, setAt] = useState(0)
+  useEffect(() => {
+    if (at === 0) return
+    const t = setTimeout(() => setAt(0), SAVED_MS)
+    return () => clearTimeout(t)
+  }, [at])
+  return [at !== 0, () => setAt(Date.now())]
+}
+
+function Saved() {
+  return (
+    <span className="saved" role="status">
+      <Glyph name="check" />
+      Saved
+    </span>
+  )
+}
+
+/** Relative within a week ("3 h ago"), otherwise the day. */
+function seen(iso: string | undefined, now: number): string {
+  if (!iso) return '–'
+  return now - Date.parse(iso) < WEEK_MS ? formatRelative(iso, now) : formatDayLong(iso, now)
+}
+
+const planOptionLabel = (p: Plan) => (p === 'unknown' ? 'Not set' : PLAN_LABELS[p])
+
+/* ───────── Claude accounts ───────── */
+
+function AccountForm({ a }: { a: Account }) {
   const update = useUpdateAccount()
+  const [saved, flashSaved] = useSavedFlash()
   const [row, setRow] = useState<AccountDraft>(() => accountDraft(a))
   // Follow refetched server label/plan while the draft is untouched (adjusting state during render).
   const synced = syncAccountDraft(row, a)
@@ -27,171 +66,299 @@ function AccountRow({ a }: { a: Account }) {
   const dirty = accountDirty(synced)
   const conflict = accountConflict(synced, a)
   const edit = (d: Partial<AccountFields>) => setRow({ ...synced, draft: { ...synced.draft, ...d } })
-  const save = () => update.mutate({ id: a.id, ...synced.draft }, { onSuccess: (saved) => setRow(accountDraft(saved)) })
+  const save = () =>
+    update.mutate(
+      { id: a.id, ...synced.draft },
+      {
+        onSuccess: (s) => {
+          setRow(accountDraft(s))
+          flashSaved()
+        },
+      },
+    )
+  const identity = a.email ?? a.account_uuid
+  const suggested = synced.draft.plan === 'unknown' ? suggestPlan(a.rate_limit_tier) : undefined
+  const labelId = `label-${a.id}`
+  const planId = `plan-${a.id}`
   return (
-    <tr>
-      <td>
-        <input
-          value={synced.draft.label}
-          onChange={(e) => edit({ label: e.target.value })}
-          maxLength={100}
-          placeholder={a.email ?? a.account_uuid}
-          aria-label="Label"
-        />
-        <div className="muted">{a.email ?? a.account_uuid}</div>
-      </td>
-      <td>
-        <select value={synced.draft.plan} onChange={(e) => edit({ plan: e.target.value as Plan })} aria-label="Plan">
-          {PLANS.map((p) => (
-            <option key={p} value={p}>{PLAN_LABELS[p]}</option>
-          ))}
-        </select>
-        <div className="muted">{[a.org_type, a.rate_limit_tier].filter(Boolean).join(' / ')}</div>
-      </td>
-      <td>
-        <button disabled={!dirty || conflict || update.isPending} onClick={save}>
+    <div className="account-form" id={`account-${a.id}`} data-unknown={a.plan === 'unknown' ? '' : undefined}>
+      <div>
+        <label htmlFor={labelId}>Label</label>
+        <input id={labelId} value={synced.draft.label} onChange={(e) => edit({ label: e.target.value })} maxLength={100} placeholder={identity} />
+        <div className="identity">{identity}</div>
+      </div>
+      <div>
+        <label htmlFor={planId}>Plan</label>
+        <div className="plan-line">
+          <select id={planId} value={synced.draft.plan} onChange={(e) => edit({ plan: e.target.value as Plan })}>
+            {PLANS.map((p) => (
+              <option key={p} value={p}>
+                {planOptionLabel(p)}
+              </option>
+            ))}
+          </select>
+          {suggested && (
+            <span className="suggest">
+              Suggested: {PLAN_LABELS[suggested]}
+              <Button size="sm" variant="secondary" onClick={() => edit({ plan: suggested })}>
+                Use it
+              </Button>
+            </span>
+          )}
+        </div>
+        {a.rate_limit_tier && (
+          <p className="plan-meta">
+            Claude reports tier: <code>{a.rate_limit_tier}</code>
+            {a.org_type && `, ${a.org_type} org`}
+          </p>
+        )}
+      </div>
+      <div className="form-actions">
+        <Button variant="secondary" disabled={!dirty || conflict || update.isPending} onClick={save}>
           {update.isPending ? 'Saving…' : 'Save'}
-        </button>
-        {conflict && <ReloadRow onReload={() => setRow(accountDraft(a))} />}
-        {update.error && <div className="error">{update.error.message}</div>}
-      </td>
-    </tr>
-  )
-}
-
-/** Shown when the server value changed under a dirty draft; Save stays disabled until reloaded. */
-function ReloadRow({ onReload }: { onReload: () => void }) {
-  return (
-    <div className="error">
-      Server value changed —{' '}
-      <button className="link" onClick={onReload}>
-        reload row
-      </button>
+        </Button>
+        {saved && !dirty && <Saved />}
+        {update.error && <p className="field-error">Couldn't save: {update.error.message}</p>}
+      </div>
+      {conflict && (
+        <div style={{ gridColumn: '1 / -1' }}>
+          <Notice
+            tone="warning"
+            action={
+              <Button size="sm" variant="secondary" onClick={() => setRow(accountDraft(a))}>
+                Load their version
+              </Button>
+            }
+          >
+            Someone else changed this account.
+          </Notice>
+        </div>
+      )}
     </div>
   )
 }
 
 function Accounts() {
   const q = useAccounts()
+  // Arriving from "Set plan" (By account): bring that row into view once it has loaded.
+  const loaded = q.data !== undefined
+  useEffect(() => {
+    if (!loaded) return
+    const hash = window.location.hash.slice(1)
+    if (!hash.startsWith('account-')) return
+    const el = document.getElementById(hash)
+    el?.scrollIntoView({ block: 'center' })
+    el?.querySelector<HTMLSelectElement>('select')?.focus({ preventScroll: true })
+  }, [loaded])
   return (
-    <section className="card">
-      <h2>Claude accounts</h2>
-      <p className="muted">Accounts appear automatically when a user's Claude Code reports usage. Set a recognisable label and the plan.</p>
-      {q.error && <div className="error">{q.error.message}</div>}
-      <div className="table-scroll">
-        <table>
-          <thead>
-            <tr><th>Label</th><th>Plan</th><th /></tr>
-          </thead>
-          <tbody>{q.data?.map((a) => <AccountRow key={a.id} a={a} />)}</tbody>
-        </table>
-      </div>
-    </section>
+    <Section id="accounts" title="Claude accounts" description="Accounts appear automatically when someone's Claude Code reports usage.">
+      {q.error && !q.data && <ErrorNotice what="load accounts" error={q.error} onRetry={() => void q.refetch()} />}
+      {!q.data && !q.error && <SkeletonRows />}
+      {q.data && q.data.length === 0 && <p className="meta">No accounts yet.</p>}
+      {q.data && q.data.length > 0 && (
+        <div className="form-list">
+          {q.data.map((a) => (
+            <AccountForm key={a.id} a={a} />
+          ))}
+        </div>
+      )}
+    </Section>
   )
 }
 
-function Users() {
-  const q = useUsers()
-  return (
-    <section className="card">
-      <h2>Users</h2>
-      {q.error && <div className="error">{q.error.message}</div>}
-      <div className="table-scroll">
-        <table>
-          <thead>
-            <tr><th>User</th><th>Joined</th><th>Last seen</th></tr>
-          </thead>
-          <tbody>
-            {q.data?.map((u) => (
-              <tr key={u.id}>
-                <td>
-                  {u.name || u.email} {u.is_admin && <span className="badge">admin</span>}
-                  <div className="muted">{u.email}</div>
-                </td>
-                <td>{formatDateTime(u.created_at)}</td>
-                <td>{u.last_seen_at ? formatDateTime(u.last_seen_at) : '—'}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-    </section>
-  )
-}
+/* ───────── CLI tokens ───────── */
 
-function Tokens() {
-  const q = useTokens()
+function TokenRows({ tokens, now }: { tokens: ApiToken[]; now: number }) {
   const revoke = useRevokeToken()
   return (
-    <section className="card">
-      <h2>CLI tokens</h2>
-      {q.error && <div className="error">{q.error.message}</div>}
-      {revoke.error && <div className="error">Revoke failed: {revoke.error.message}</div>}
-      <div className="table-scroll">
-        <table>
-          <thead>
-            <tr><th>User</th><th>Device</th><th>Created</th><th>Last used</th><th /></tr>
-          </thead>
-          <tbody>
-            {q.data?.map((t) => (
-              <tr key={t.id}>
-                <td>{t.user.email}</td>
-                <td>{t.device_name}</td>
-                <td>{formatDateTime(t.created_at)}</td>
-                <td>{t.last_used_at ? formatDateTime(t.last_used_at) : '—'}</td>
-                <td>
-                  {t.revoked_at ? (
-                    <span className="muted">Revoked {formatDateTime(t.revoked_at)}</span>
-                  ) : (
-                    <button
-                      disabled={revoke.isPending}
-                      onClick={() => {
-                        if (confirm(`Revoke ${t.user.email}'s token on ${t.device_name}? Their Claude Code will stop working until they log in again.`)) revoke.mutate(t.id)
-                      }}
-                    >
-                      Revoke
-                    </button>
-                  )}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-    </section>
-  )
-}
-
-function RateInputs({
-  draft,
-  onChange,
-  disabled = false,
-}: {
-  draft: RateDraft
-  onChange: (d: RateDraft) => void
-  disabled?: boolean
-}) {
-  return (
     <>
-      {BASE_RATE_FIELDS.map((f) => (
-        <td key={f.key} className="num">
-          <input
-            className="rate"
-            type="text"
-            inputMode="decimal"
-            aria-label={f.label}
-            value={draft[f.key]}
-            disabled={disabled}
-            onChange={(e) => onChange({ ...draft, [f.key]: e.target.value })}
-          />
-        </td>
+      {tokens.map((t) => (
+        <tr key={t.id}>
+          <td>
+            {t.user.name || t.user.email}
+            {t.user.name && <div className="sub">{t.user.email}</div>}
+          </td>
+          <td>{t.device_name}</td>
+          <td>{formatDayLong(t.created_at, now)}</td>
+          <td>{t.last_used_at ? seen(t.last_used_at, now) : <span className="dash">Never</span>}</td>
+          <td className="num">
+            {t.revoked_at ? (
+              <span className="sub">Revoked {formatDayLong(t.revoked_at, now)}</span>
+            ) : (
+              <ConfirmButton
+                label="Revoke"
+                confirmLabel="Revoke token"
+                prompt={`Revoke ${t.device_name}? Their Claude Code stops working until they log in again.`}
+                pending={revoke.isPending && revoke.variables === t.id}
+                onConfirm={() => revoke.mutate(t.id)}
+              />
+            )}
+            {revoke.error && revoke.variables === t.id && <p className="field-error">Couldn't revoke: {revoke.error.message}</p>}
+          </td>
+        </tr>
       ))}
     </>
   )
 }
 
+function Tokens() {
+  const q = useTokens()
+  const now = useNow()
+  const revoked = useDisclosure()
+  const used = (t: ApiToken) => Date.parse(t.last_used_at ?? t.created_at)
+  const active = (q.data ?? []).filter((t) => !t.revoked_at).sort((a, b) => used(b) - used(a))
+  const gone = (q.data ?? []).filter((t) => t.revoked_at).sort((a, b) => Date.parse(b.revoked_at!) - Date.parse(a.revoked_at!))
+  const head = (
+    <thead>
+      <tr>
+        <th scope="col">User</th>
+        <th scope="col">Device</th>
+        <th scope="col">Created</th>
+        <th scope="col">Last used</th>
+        <th scope="col">
+          <span className="sr-only">Action</span>
+        </th>
+      </tr>
+    </thead>
+  )
+  return (
+    <Section id="tokens" title="CLI tokens" description="One per device someone has logged in from with cctrack login.">
+      {q.error && !q.data && <ErrorNotice what="load CLI tokens" error={q.error} onRetry={() => void q.refetch()} />}
+      {!q.data && !q.error && <SkeletonRows />}
+      {q.data && (
+        <>
+          {active.length === 0 ? (
+            <p className="meta">No active tokens.</p>
+          ) : (
+            <div className="table-scroll">
+              <table className="table" data-hover="">
+                {head}
+                <tbody>
+                  <TokenRows tokens={active} now={now} />
+                </tbody>
+              </table>
+            </div>
+          )}
+          {gone.length > 0 && (
+            <>
+              <Button variant="ghost" className="disclosure" {...revoked.buttonProps}>
+                <Glyph name="chevron-right" />
+                {revoked.open ? 'Hide' : 'Show'} {gone.length} revoked {gone.length === 1 ? 'token' : 'tokens'}
+              </Button>
+              <div className="table-scroll mt-3" {...revoked.regionProps}>
+                <table className="table">
+                  {head}
+                  <tbody>
+                    <TokenRows tokens={gone} now={now} />
+                  </tbody>
+                </table>
+              </div>
+            </>
+          )}
+        </>
+      )}
+    </Section>
+  )
+}
+
+/* ───────── People ───────── */
+
+function People() {
+  const q = useUsers()
+  const now = useNow()
+  return (
+    <Section id="people" title="People" description="Everyone who has signed in. Select a name to see their usage and sessions.">
+      {q.error && !q.data && <ErrorNotice what="load people" error={q.error} onRetry={() => void q.refetch()} />}
+      {!q.data && !q.error && <SkeletonRows />}
+      {q.data && (
+        <div className="table-scroll">
+          <table className="table" data-hover="">
+            <thead>
+              <tr>
+                <th scope="col">Person</th>
+                <th scope="col">Joined</th>
+                <th scope="col">Last seen</th>
+              </tr>
+            </thead>
+            <tbody>
+              {q.data.map((u) => (
+                <tr key={u.id}>
+                  <td>
+                    <span className="chip-wrap">
+                      <Link to="/admin/logins" search={{ open: u.id }}>
+                        {u.name || u.email}
+                      </Link>
+                      {u.is_admin && <span className="chip">Admin</span>}
+                    </span>
+                    {u.name && <div className="sub">{u.email}</div>}
+                  </td>
+                  <td>{formatDayLong(u.created_at, now)}</td>
+                  <td>{seen(u.last_seen_at, now)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </Section>
+  )
+}
+
+/* ───────── Model prices ───────── */
+
+function RateInputs({
+  draft,
+  onChange,
+  disabled = false,
+  showInvalid,
+  errorId,
+  idPrefix,
+}: {
+  draft: RateDraft
+  onChange: (d: RateDraft) => void
+  disabled?: boolean
+  showInvalid: boolean
+  errorId: string
+  idPrefix: string
+}) {
+  return (
+    <>
+      {BASE_RATE_FIELDS.map((f) => {
+        const bad = showInvalid && typeof parseRate(draft[f.key]) === 'string'
+        return (
+          <td key={f.key} className="num">
+            <input
+              id={`${idPrefix}-${f.key}`}
+              className="rate"
+              type="text"
+              inputMode="decimal"
+              aria-label={f.label}
+              aria-invalid={bad || undefined}
+              aria-describedby={bad ? errorId : undefined}
+              value={draft[f.key]}
+              disabled={disabled}
+              onChange={(e) => onChange({ ...draft, [f.key]: e.target.value })}
+            />
+          </td>
+        )
+      })}
+    </>
+  )
+}
+
+function tierNote(p: ModelPrice): string | undefined {
+  const fast = p.rates.fast_input !== undefined
+  const long = p.rates.long_input !== undefined
+  if (fast && long) return 'Also has fast-mode and long-context rates (kept as is).'
+  if (fast) return 'Also has fast-mode rates (kept as is).'
+  if (long) return 'Also has long-context rates (kept as is).'
+  return undefined
+}
+
 function PriceRow({ p }: { p: ModelPrice }) {
   const put = usePutPrice()
+  const errorId = useId()
+  const [saved, flashSaved] = useSavedFlash()
   const [row, setRow] = useState<RowDraft>(() => rowDraft(p.rates))
   // Follow refetched server rates while the draft is untouched (adjusting state during render).
   const synced = syncRowDraft(row, p.rates)
@@ -200,30 +367,54 @@ function PriceRow({ p }: { p: ModelPrice }) {
   const conflict = rowConflict(synced, p.rates)
   const parsed = parseDraft(synced.draft)
   const invalid = 'error' in parsed ? parsed.error : undefined
+  const note = tierNote(p)
   const save = () => {
     if (!('rates' in parsed)) return
     put.mutate(
       // Spread the saved rates first so fast_* / long_* groups are sent back unchanged.
       { model: p.model, rates: { ...p.rates, ...parsed.rates } },
-      { onSuccess: (saved) => setRow(rowDraft(saved.rates)) },
+      {
+        onSuccess: (s) => {
+          setRow(rowDraft(s.rates))
+          flashSaved()
+        },
+      },
     )
   }
   return (
     <tr>
       <td>
-        {p.model}
-        {(p.rates.fast_input !== undefined || p.rates.long_input !== undefined) && (
-          <div className="muted">{[p.rates.fast_input !== undefined && 'fast mode', p.rates.long_input !== undefined && '>100k tier'].filter(Boolean).join(', ')}</div>
-        )}
+        <span className="model-id">{p.model}</span>
+        {note && <div className="tier-note">{note}</div>}
       </td>
-      <RateInputs draft={synced.draft} onChange={(draft) => setRow({ ...synced, draft })} />
-      <td>
-        <button disabled={!dirty || conflict || invalid !== undefined || put.isPending} onClick={save}>
-          {put.isPending ? 'Saving…' : 'Save'}
-        </button>
-        {conflict && <ReloadRow onReload={() => setRow(rowDraft(p.rates))} />}
-        {dirty && invalid && <div className="error">{invalid}</div>}
-        {put.error && <div className="error">{put.error.message}</div>}
+      <RateInputs
+        draft={synced.draft}
+        onChange={(draft) => setRow({ ...synced, draft })}
+        showInvalid={dirty}
+        errorId={errorId}
+        idPrefix={`price-${p.model}`}
+      />
+      <td className="num">
+        <div className="form-actions" style={{ paddingTop: 0 }}>
+          <Button variant="secondary" disabled={!dirty || conflict || invalid !== undefined || put.isPending} onClick={save}>
+            {put.isPending ? 'Saving…' : 'Save'}
+          </Button>
+          {saved && !dirty && <Saved />}
+          {conflict && (
+            <p className="field-error" style={{ color: 'var(--warn-text)' }}>
+              Someone else changed this price.{' '}
+              <button type="button" className="btn-text" onClick={() => setRow(rowDraft(p.rates))}>
+                Load their version
+              </button>
+            </p>
+          )}
+          {dirty && invalid && (
+            <p className="field-error" id={errorId}>
+              {invalid}
+            </p>
+          )}
+          {put.error && <p className="field-error">Couldn't save: {put.error.message}</p>}
+        </div>
       </td>
     </tr>
   )
@@ -231,12 +422,14 @@ function PriceRow({ p }: { p: ModelPrice }) {
 
 function AddPriceRow() {
   const put = usePutPrice()
+  const errorId = useId()
   const [model, setModel] = useState('')
   const [draft, setDraft] = useState<RateDraft>(EMPTY_DRAFT)
   const [saved, setSaved] = useState<string>()
   const touched = model !== '' || Object.values(draft).some((v) => v !== '')
   const parsed = parseDraft(draft)
-  const invalid = modelError(model) ?? ('error' in parsed ? parsed.error : undefined)
+  const mErr = modelError(model)
+  const invalid = mErr ?? ('error' in parsed ? parsed.error : undefined)
   const save = () => {
     if (invalid !== undefined || !('rates' in parsed)) return
     setSaved(undefined)
@@ -268,7 +461,11 @@ function AddPriceRow() {
           disabled={put.isPending}
           placeholder="New model id, e.g. claude-opus-6"
           aria-label="New model id"
+          aria-invalid={(touched && mErr !== undefined) || undefined}
+          aria-describedby={touched && invalid ? errorId : undefined}
           maxLength={200}
+          className="mono"
+          style={{ width: '16rem', maxWidth: '100%' }}
         />
       </td>
       <RateInputs
@@ -278,14 +475,23 @@ function AddPriceRow() {
           setDraft(d)
           setSaved(undefined)
         }}
+        showInvalid={touched}
+        errorId={errorId}
+        idPrefix="price-new"
       />
-      <td>
-        <button disabled={!touched || invalid !== undefined || put.isPending} onClick={save}>
-          {put.isPending ? 'Saving…' : 'Add'}
-        </button>
-        {touched && invalid && <div className="error">{invalid}</div>}
-        {put.error && <div className="error">{addPriceError(put.error)}</div>}
-        {saved && <div className="muted">Saved as {saved}</div>}
+      <td className="num">
+        <div className="form-actions" style={{ paddingTop: 0 }}>
+          <Button variant="secondary" disabled={!touched || invalid !== undefined || put.isPending} onClick={save}>
+            {put.isPending ? 'Saving…' : 'Add model'}
+          </Button>
+          {touched && invalid && (
+            <p className="field-error" id={errorId}>
+              {invalid}
+            </p>
+          )}
+          {put.error && <p className="field-error">Couldn't add model: {addPriceError(put.error)}</p>}
+          {saved && <span className="saved">Saved as {saved}</span>}
+        </div>
       </td>
     </tr>
   )
@@ -294,43 +500,92 @@ function AddPriceRow() {
 function Prices() {
   const q = usePrices()
   return (
-    <section className="card">
-      <h2>Model prices (USD per million tokens)</h2>
-      <p className="muted">
-        Used to estimate API-equivalent cost. Changes apply to all past usage. Add a row for a model that shows as
-        unpriced; the id is normalised (dates and provider prefixes removed). To change an existing model's price, edit its row.
-      </p>
-      {q.error && <div className="error">{q.error.message}</div>}
-      <div className="table-scroll">
-        <table>
-          <thead>
-            <tr>
-              <th>Model</th>
-              {BASE_RATE_FIELDS.map((f) => (
-                <th key={f.key} className="num">{f.label}</th>
+    <Section
+      id="prices"
+      title="Model prices"
+      description="USD per million tokens. Used only for the API-equivalent figures, and changes apply to all past usage. Add a model that shows as unpriced."
+    >
+      {q.error && !q.data && <ErrorNotice what="load model prices" error={q.error} onRetry={() => void q.refetch()} />}
+      {!q.data && !q.error && <SkeletonRows />}
+      {q.data && (
+        <div className="table-scroll">
+          <table className="table">
+            <thead>
+              <tr>
+                <th scope="col">Model</th>
+                {BASE_RATE_FIELDS.map((f) => (
+                  <th key={f.key} scope="col" className="num">
+                    {f.label}
+                  </th>
+                ))}
+                <th scope="col">
+                  <span className="sr-only">Save</span>
+                </th>
+              </tr>
+            </thead>
+            <tbody>
+              {q.data.map((p) => (
+                <PriceRow key={p.model} p={p} />
               ))}
-              <th />
-            </tr>
-          </thead>
-          <tbody>{q.data?.map((p) => <PriceRow key={p.model} p={p} />)}</tbody>
-          <tfoot>
-            <AddPriceRow />
-          </tfoot>
-        </table>
-      </div>
-    </section>
+            </tbody>
+            <tfoot>
+              <AddPriceRow />
+            </tfoot>
+          </table>
+        </div>
+      )}
+    </Section>
+  )
+}
+
+/* ───────── Page ───────── */
+
+function UnknownPlanNotice() {
+  const q = useAccounts()
+  const unknown = q.data?.filter((a) => a.plan === 'unknown') ?? []
+  if (unknown.length === 0) return null
+  const n = unknown.length
+  const show = () => {
+    const row = document.getElementById(`account-${unknown[0].id}`)
+    row?.scrollIntoView({ block: 'center' })
+    document.getElementById(`plan-${unknown[0].id}`)?.focus({ preventScroll: true })
+  }
+  return (
+    <div className="settings-notice">
+      <Notice
+        tone="warning"
+        action={
+          <Button size="sm" variant="secondary" onClick={show}>
+            Show accounts
+          </Button>
+        }
+      >
+        {n} {n === 1 ? 'account has' : 'accounts have'} no plan set. Set the plan so everyone can tell which pool account is which tier.
+      </Notice>
+    </div>
   )
 }
 
 export function AdminSettingsPage() {
   return (
     <>
-      <h1>Settings</h1>
+      <PageHeader title="Settings" />
       <AdminOnly>
-        <Accounts />
-        <Tokens />
-        <Users />
-        <Prices />
+        <UnknownPlanNotice />
+        <div className="settings-layout">
+          <nav className="settings-nav" aria-label="Settings sections">
+            <a href="#accounts">Accounts</a>
+            <a href="#tokens">CLI tokens</a>
+            <a href="#people">People</a>
+            <a href="#prices">Model prices</a>
+          </nav>
+          <div className="settings-main">
+            <Accounts />
+            <Tokens />
+            <People />
+            <Prices />
+          </div>
+        </div>
       </AdminOnly>
     </>
   )
