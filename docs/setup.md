@@ -88,12 +88,26 @@ pool (`ANTHROPIC_BASE_URL` pointing at `127.0.0.1`/`localhost` or the proxy's po
 credited to the pool account that served each request, read from the proxy's log
 (`~/.cli-proxy-api/logs/main.log`; set `CCTRACK_CLIPROXY_DIR` if it lives elsewhere), not to the
 account you are signed in with. Only each pool account's id, email and organization are read from
-its auth file; its tokens are never kept, printed or uploaded. Set each pool account's plan
+its auth file (and kept in cctrack's state dir, so usage stays attributable if the file is later
+deleted or renamed); its tokens are never kept, printed or uploaded. Set each pool account's plan
 in the dashboard's Settings. `cctrack proxy status` shows what is detected and the pool accounts;
-`cctrack proxy auto|on|off` sets the mode (`auto`, the default, detects per session from Claude
-Code's environment and settings files; `on` treats every session as proxied; `off` never credits pool
-accounts), and `CCTRACK_PROXY_MODE` overrides it. `cctrack sync --dry-run` prints each session's
-attribution without uploading.
+`cctrack proxy auto|on|off` sets the mode, and `CCTRACK_PROXY_MODE` overrides it:
+
+- `auto` (the default) decides per session from Claude Code's environment (recorded by the plugin's
+  hooks) and settings files. An `ANTHROPIC_BASE_URL` set to `""` in a higher-priority settings file
+  means not proxied, as in Claude Code. A session with no hook record and no `ANTHROPIC_BASE_URL`
+  anywhere (e.g. started before the plugin was installed) is judged from the proxy log: it counts as
+  proxied when at least 80% of at least 3 of its responses arrived while a request of a session with
+  the same first character and model was running. That decision is kept for the session.
+- `on` credits **every** session from the proxy log, even sessions a hook saw as not proxied (for
+  example a plain `claude` started without the proxy). Use it only if all your Claude Code usage goes
+  through the pool.
+- `off` never credits pool accounts.
+
+`cctrack sync --dry-run` prints each session's attribution without uploading, including sessions
+that look proxied but are credited to your own account. The proxy log is in the proxy host's local
+time; if a proxied session matches nothing with this machine's offset, cctrack finds the offset that
+fits (shown as a warning by `proxy status` and `--dry-run`).
 
 ## 5. Enable the Claude Code plugin (each developer)
 
