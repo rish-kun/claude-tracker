@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { datesBetween, dayString, msUntilRangeTick, nextMinute, presetRange, rangeAdvanced, rangeKey, rangeQuery, startOfDay } from './range'
+import { datesBetween, dayString, msUntilRangeTick, nextMinute, presetRange, rangeAdvanced, rangeKey, rangeLabel, rangeQuery, startOfDay } from './range'
 
 describe('range', () => {
   it('computes day strings in a timezone', () => {
@@ -116,5 +116,15 @@ describe('range', () => {
       expect(rangeAdvanced(k7, rangeKey(presetRange('7d', now, 'Asia/Kolkata')))).toBe(false)
       expect(rangeAdvanced(k7, k7)).toBe(true)
     })
+  })
+})
+
+describe('rangeLabel', () => {
+  it('shows the resolved days, or "Since midnight" for Today', () => {
+    const r = { from: new Date('2026-10-01T00:00:00Z'), to: new Date('2026-10-15T12:01:00Z'), tz: 'UTC' }
+    expect(rangeLabel('30d', r, 'en-GB')).toBe('1 Oct – 15 Oct')
+    expect(rangeLabel('today', r, 'en-GB')).toBe('Since midnight')
+    // `to` at local midnight belongs to the previous day.
+    expect(rangeLabel('7d', { ...r, to: new Date('2026-10-15T00:00:00Z') }, 'en-GB')).toBe('1 Oct – 14 Oct')
   })
 })

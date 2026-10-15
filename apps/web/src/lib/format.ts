@@ -1,4 +1,5 @@
 import type { Plan } from '../api/client'
+import { dayString } from './range'
 
 function trim(n: number, digits: number): string {
   return n.toFixed(digits).replace(/\.?0+$/, '')
@@ -13,6 +14,7 @@ export function formatTokens(n: number): string {
 }
 
 export function formatUSD(n: number): string {
+  if (n > 0 && n < 0.005) return '<$0.01'
   if (Math.abs(n) >= 100) return `$${Math.round(n).toLocaleString('en-US')}`
   return `$${n.toFixed(2)}`
 }
@@ -58,5 +60,103 @@ export const PLAN_LABELS: Record<Plan, string> = {
   team: 'Team',
   enterprise: 'Enterprise',
   api_key: 'API key',
-  unknown: 'Unknown plan',
+  unknown: 'Plan not set',
+}
+
+
+/** Locale and time zone for the date helpers; both default to the browser's. */
+export interface DateOpts {
+  locale?: string
+  timeZone?: string
+}
+
+/** Share of `part` in `whole`: "0%" for nothing, "<1%" for a sliver, else a rounded percentage. */
+export function formatShare(part: number, whole: number): string {
+  if (part <= 0 || whole <= 0) return '0%'
+  const pct = (part / whole) * 100
+  if (pct < 0.5) return '<1%'
+  return `${Math.round(pct)}%`
+}
+
+/** Counts such as API calls: 1,234. */
+export function formatCount(n: number): string {
+  return Math.round(n).toLocaleString('en-US')
+}
+
+/** Time of day in the user's locale: 14:05 or 2:05 pm. */
+export function formatTime(iso: string | number, o: DateOpts = {}): string {
+  return new Date(iso).toLocaleTimeString(o.locale, { hour: '2-digit', minute: '2-digit', timeZone: o.timeZone })
+}
+
+function year(t: number, timeZone?: string): string {
+  return dayString(new Date(t), timeZone ?? Intl.DateTimeFormat().resolvedOptions().timeZone).slice(0, 4)
+}
+
+/** Weekday, day and month ("Mon 13 Oct"), plus the year when it isn't the current one. */
+export function formatDayLong(iso: string | number, now: number = Date.now(), o: DateOpts = {}): string {
+  const t = new Date(iso).getTime()
+  const withYear = year(t, o.timeZone) !== year(now, o.timeZone)
+  return new Date(t).toLocaleDateString(o.locale, {
+    weekday: 'short',
+    day: 'numeric',
+    month: 'short',
+    year: withYear ? 'numeric' : undefined,
+    timeZone: o.timeZone,
+  })
+}
+
+/** Ledger day heading: "Today", "Yesterday", else the long day. */
+export function formatDayGroup(iso: string | number, now: number = Date.now(), o: DateOpts = {}): string {
+  const tz = o.timeZone ?? Intl.DateTimeFormat().resolvedOptions().timeZone
+  const day = dayString(new Date(iso), tz)
+  const today = dayString(new Date(now), tz)
+  if (day === today) return 'Today'
+  const [y, m, d] = today.split('-').map(Number)
+  const yesterday = new Date(Date.UTC(y, m - 1, d - 1)).toISOString().slice(0, 10)
+  if (day === yesterday) return 'Yesterday'
+  return formatDayLong(iso, now, o)
+}
+
+const MIN = 60_000
+const HOUR = 60 * MIN
+const DAY = 24 * HOUR
+
+/** "under a minute", "12 min", "1 h 12 min", "3 h", "2 d 4 h". */
+export function formatDuration(ms: number): string {
+  if (!(ms >= MIN)) return 'under a minute'
+  if (ms < HOUR) return `${Math.floor(ms / MIN)} min`
+  if (ms < DAY) {
+    const h = Math.floor(ms / HOUR)
+    const m = Math.floor((ms % HOUR) / MIN)
+    return m === 0 ? `${h} h` : `${h} h ${m} min`
+  }
+  const d = Math.floor(ms / DAY)
+  const h = Math.floor((ms % DAY) / HOUR)
+  return h === 0 ? `${d} d` : `${d} d ${h} h`
+}
+
+/** "just now", "12 min ago", "5 h ago", else the long day. */
+export function formatRelative(iso: string, now: number = Date.now(), o: DateOpts = {}): string {
+  const diff = now - Date.parse(iso)
+  if (diff < MIN) return 'just now'
+  if (diff < HOUR) return `${Math.floor(diff / MIN)} min ago`
+  if (diff < DAY) return `${Math.floor(diff / HOUR)} h ago`
+  return formatDayLong(iso, now, o)
+}
+
+/**
+ * When a plan window resets: "Resets in 2 h 14 min" within a day, else "Resets Mon 20 Oct, 09:00".
+ * A reset time in the past reads "Reset at 14:00" (LimitMeter words that case itself).
+ */
+export function formatReset(iso: string, now: number = Date.now(), o: DateOpts = {}): string {
+  const diff = Date.parse(iso) - now
+  if (diff < 0) return `Reset at ${formatTime(iso, o)}`
+  if (diff < DAY) return `Resets in ${formatDuration(diff)}`
+  return `Resets ${formatDayLong(iso, now, o)}, ${formatTime(iso, o)}`
+}
+
+/** Chart axis day from a YYYY-MM-DD string, read as a local date (never shifted by UTC): "13 Oct". */
+export function formatDayTick(ymd: string, locale?: string): string {
+  const [y, m, d] = ymd.split('-').map(Number)
+  return new Date(y, m - 1, d).toLocaleDateString(locale, { day: 'numeric', month: 'short' })
 }
