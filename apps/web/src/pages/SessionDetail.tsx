@@ -169,7 +169,7 @@ function ByModel({ d }: { d: SessionDetail }) {
                 const share = whole > 0 ? (priced ? r.totals.cost_usd : readTokens(r.totals)) / whole : 0
                 return (
                   <tr key={r.model}>
-                    <td style={{ overflowWrap: 'anywhere' }}>{r.model}</td>
+                    <td className="id-cell">{r.model}</td>
                     <td className="num">{formatCount(r.calls)}</td>
                     <td className="num">{formatTokens(readTokens(r.totals))}</td>
                     <td className="num">{formatTokens(r.totals.output)}</td>
@@ -270,7 +270,7 @@ export function SessionDetailPage() {
   if (q.error instanceof ApiError && q.error.status === 404) {
     return (
       <>
-        <BackLink toMine={!isAdmin} />
+        <BackLink toMine />
         <EmptyState
           title="Session not found."
           action={

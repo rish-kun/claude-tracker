@@ -253,6 +253,11 @@
   svg {
     flex: none;
   }
+
+  ul[role='list'] {
+    list-style: none;
+    padding: 0;
+  }
 }
 
 /* ───────────────────────────── layout ───────────────────────────── */
@@ -273,10 +278,6 @@
     display: flex;
     align-items: center;
     gap: var(--s-6);
-  }
-
-  .header-row .nav {
-    display: none;
   }
 
   .header-end {
@@ -302,10 +303,6 @@
   }
 
   @media (min-width: 860px) {
-    .header-row .nav {
-      display: flex;
-    }
-
     .tabrow {
       display: none;
     }
@@ -350,8 +347,14 @@
   .usage-grid {
     display: grid;
     grid-template-columns: minmax(0, 1fr);
-    grid-template-areas: 'limits' 'sentence' 'mix' 'ledger' 'chart' 'rail';
-    gap: var(--s-7);
+    grid-template-areas: 'limits' 'sentence' 'mix' 'ledger' 'chart' 'rail' 'foot';
+    /* Spacing comes from margins, not row gaps, so areas that aren't rendered (loading,
+       error, Today) leave no doubled gaps behind. */
+    column-gap: var(--s-7);
+  }
+
+  .usage-grid > :where(.area-sentence, .area-mix, .area-rail, .area-foot) {
+    margin-top: var(--s-7);
   }
 
   .usage-grid > * {
@@ -386,13 +389,13 @@
   }
 
   .area-foot {
-    grid-column: 1 / -1;
+    grid-area: foot;
   }
 
   @media (min-width: 1100px) {
     .usage-grid {
       grid-template-columns: minmax(0, 1fr) 320px;
-      grid-template-areas: 'limits limits' 'sentence sentence' 'mix mix' 'chart chart' 'ledger rail';
+      grid-template-areas: 'limits limits' 'sentence sentence' 'mix mix' 'chart chart' 'ledger rail' 'foot foot';
     }
   }
 
@@ -456,6 +459,13 @@
     align-items: stretch;
     gap: var(--s-5);
     align-self: stretch;
+  }
+
+  /* The header row carries the nav from 860px; below that the tab row does. */
+  @media (max-width: 859px) {
+    .header-row .nav {
+      display: none;
+    }
   }
 
   .nav a {
@@ -819,7 +829,6 @@
 
   .section:first-child,
   .two-col > .section,
-  .usage-grid > .section,
   .area-rail > .section,
   .settings-main > .section:first-child {
     margin-top: 0;
@@ -1326,6 +1335,9 @@
   .table-scroll {
     overflow-x: auto;
     max-width: 100%;
+    /* Contain absolutely positioned descendants (e.g. .sr-only headers), which would
+       otherwise escape the scroller and widen the whole page on phones. */
+    position: relative;
   }
 
   .table {
@@ -1361,6 +1373,32 @@
     text-align: right;
     white-space: nowrap;
     font-variant-numeric: tabular-nums lining-nums;
+  }
+
+  /* Row headers sit level with the first line of their cells. */
+  .table tbody th {
+    vertical-align: top;
+  }
+
+  /* Ids such as model names break at their hyphens, never mid-word. */
+  .table .id-cell {
+    overflow-wrap: break-word;
+  }
+
+  /*
+   * On phones, cells keep to one line and the table scrolls inside .table-scroll, rather
+   * than squeezing every column until words break at hyphens ("rishit-/mbp").
+   */
+  @media (max-width: 559px) {
+    .table-scroll .table td,
+    .table-scroll .table tbody th {
+      white-space: nowrap;
+    }
+
+    .table-scroll .table .wrap {
+      white-space: normal;
+      min-width: 12em;
+    }
   }
 
   .table tbody tr {
@@ -1746,8 +1784,9 @@
     grid-template-rows: 1fr;
   }
 
+  /* clip, not hidden: hidden would make this a scroll container and offset the sticky day headings inside it. */
   .person-drawer > div {
-    overflow: hidden;
+    overflow: clip;
     min-height: 0;
   }
 
@@ -1899,9 +1938,12 @@
     color: var(--text-2);
     padding-bottom: var(--s-1);
     white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    min-width: 0;
+    /* A label stays whole: when its segment is too narrow, the next label starts after it. */
+    min-width: max-content;
+  }
+
+  .cost-split-labels > span:first-child {
+    padding-right: var(--s-3);
   }
 
   .cost-split-bar {
@@ -1931,6 +1973,19 @@
     font: var(--t-body);
     color: var(--text-2);
     border-bottom: var(--hair);
+  }
+
+  /* Three narrow columns fit a phone at meta size; headings may wrap. */
+  @media (max-width: 559px) {
+    .table-scroll .compare :where(td, th) {
+      font: var(--t-meta);
+      white-space: normal;
+      padding-inline: 6px;
+    }
+
+    .table-scroll .compare td.num {
+      white-space: nowrap;
+    }
   }
 
   .compare .share {
@@ -2302,6 +2357,11 @@
 
 /* ───────────────────────────── utilities ───────────────────────────── */
 @layer utilities {
+  /* `hidden` must win over any component display value (e.g. a collapsed grid). */
+  [hidden] {
+    display: none !important;
+  }
+
   .sr-only {
     position: absolute;
     width: 1px;

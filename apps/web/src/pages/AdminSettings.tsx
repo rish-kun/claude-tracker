@@ -222,7 +222,15 @@ function Tokens() {
     </thead>
   )
   return (
-    <Section id="tokens" title="CLI tokens" description="One per device someone has logged in from with cctrack login.">
+    <Section
+      id="tokens"
+      title="CLI tokens"
+      description={
+        <>
+          One per device someone has logged in from with <code>cctrack login</code>.
+        </>
+      }
+    >
       {q.error && !q.data && <ErrorNotice what="load CLI tokens" error={q.error} onRetry={() => void q.refetch()} />}
       {!q.data && !q.error && <SkeletonRows />}
       {q.data && (
@@ -270,7 +278,8 @@ function People() {
     <Section id="people" title="People" description="Everyone who has signed in. Select a name to see their usage and sessions.">
       {q.error && !q.data && <ErrorNotice what="load people" error={q.error} onRetry={() => void q.refetch()} />}
       {!q.data && !q.error && <SkeletonRows />}
-      {q.data && (
+      {q.data && q.data.length === 0 && <p className="meta">No one has signed in yet.</p>}
+      {q.data && q.data.length > 0 && (
         <div className="table-scroll">
           <table className="table" data-hover="">
             <thead>
@@ -459,7 +468,7 @@ function AddPriceRow() {
           }}
           // Locked while an Add is in flight so its result matches what is shown.
           disabled={put.isPending}
-          placeholder="New model id, e.g. claude-opus-6"
+          placeholder="e.g. claude-opus-6"
           aria-label="New model id"
           aria-invalid={(touched && mErr !== undefined) || undefined}
           aria-describedby={touched && invalid ? errorId : undefined}

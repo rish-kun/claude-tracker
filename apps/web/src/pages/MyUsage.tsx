@@ -93,7 +93,7 @@ function BreakdownTable({ title, first, rows }: { title: string; first: string; 
             <tbody>
               {sorted.map((r) => (
                 <tr key={r.key}>
-                  <td style={{ overflowWrap: 'anywhere' }}>{r.label}</td>
+                  <td className="id-cell">{r.label}</td>
                   <td className="num">{formatTokens(readTokens(r.totals))}</td>
                   <td className="num">{formatTokens(r.totals.output)}</td>
                   <td className="num">
@@ -172,7 +172,8 @@ export function MyUsagePage() {
                 <TokenMix totals={u.totals} />
               </div>
             )}
-            {preset !== 'today' && (
+            {/* One bar (Today) or no bars says nothing, so the chart is left out. */}
+            {preset !== 'today' && u.daily_by_model.length > 0 && (
               <Section title="API-equivalent cost per day, by model" className="area-chart">
                 <StackedDailyBars
                   title="API-equivalent cost per day by model"
