@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { LimitSnapshot } from '../api/client'
-import { filledCells, formatTimeTick, limitLevel, limitPressure, limitTimeline, type ResetMarker, selectResetMarkers, windowState } from './limits'
+import { filledCells, formatTimeTick, limitLevel, limitPressure, limitTimeline, type ResetMarker, selectResetMarkers, timeTicks, windowState } from './limits'
 
 const snap = (captured_at: string, extra: Partial<LimitSnapshot> = {}): LimitSnapshot => ({ account_id: 1, captured_at, ...extra })
 
@@ -114,5 +114,50 @@ describe('limit meter levels', () => {
     expect(
       limitPressure(snap('2026-10-15T11:00:00Z', { five_hour_pct: 95, five_hour_resets_at: '2026-10-15T11:30:00Z', seven_day_pct: 40 }), now),
     ).toBe(40)
+  })
+})
+
+describe('timeTicks', () => {
+  const H = 3_600_000
+  const D = 24 * H
+
+  it('puts one tick per local midnight (or fewer) on spans over two days, never repeating a day', () => {
+    const from = new Date(2026, 9, 9, 14, 30).getTime()
+    const to = new Date(2026, 9, 15, 22, 0).getTime()
+    const ticks = timeTicks([from, to])
+    expect(ticks.length).toBeGreaterThan(1)
+    expect(ticks.length).toBeLessThanOrEqual(7)
+    for (const t of ticks) {
+      const d = new Date(t)
+      expect([d.getHours(), d.getMinutes()]).toEqual([0, 0])
+      expect(t).toBeGreaterThanOrEqual(from)
+      expect(t).toBeLessThanOrEqual(to)
+    }
+    expect(new Set(ticks.map((t) => new Date(t).toDateString())).size).toBe(ticks.length)
+    expect(new Date(ticks[0]).getDate()).toBe(10)
+  })
+
+  it('spaces days further apart on long spans', () => {
+    const from = new Date(2026, 6, 1).getTime()
+    const ticks = timeTicks([from, from + 90 * D])
+    expect(ticks.length).toBeLessThanOrEqual(7)
+    expect(ticks[1] - ticks[0]).toBeGreaterThanOrEqual(14 * D - 2 * H)
+  })
+
+  it('uses aligned whole hours on short spans', () => {
+    const from = new Date(2026, 9, 15, 8, 20).getTime()
+    const ticks = timeTicks([from, from + 30 * H])
+    expect(ticks.length).toBeLessThanOrEqual(7)
+    for (const t of ticks) {
+      const d = new Date(t)
+      expect(d.getMinutes()).toBe(0)
+      expect(d.getHours() % 6).toBe(0)
+      expect(t).toBeGreaterThanOrEqual(from)
+    }
+    expect(new Date(ticks[0]).getHours()).toBe(12)
+  })
+
+  it('handles an empty span', () => {
+    expect(timeTicks([5, 5])).toEqual([5])
   })
 })

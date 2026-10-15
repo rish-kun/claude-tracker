@@ -81,6 +81,38 @@ export function formatTimeTick(t: number, spanMs: number, locale?: string, timeZ
   return new Date(t).toLocaleString(locale, opts)
 }
 
+const HOUR_MS = 3_600_000
+const HOUR_STEPS = [1, 2, 3, 6, 12]
+const DAY_STEPS = [1, 2, 3, 7, 14, 30]
+
+/**
+ * Time-axis ticks for the limit timeline, aligned to local time so labels never repeat:
+ * whole hours (1, 2, 3, 6 or 12 apart) for spans up to two days, local midnights
+ * (1, 2, 3, 7, 14 or 30 days apart) beyond that. At most `maxTicks` ticks.
+ */
+export function timeTicks(domain: [number, number], maxTicks = 7): number[] {
+  const [from, to] = domain
+  if (!(to > from)) return [from]
+  const span = to - from
+  const out: number[] = []
+  if (span <= 2 * DAY_MS) {
+    const step = HOUR_STEPS.find((h) => span / (h * HOUR_MS) <= maxTicks) ?? 24
+    const d = new Date(from)
+    d.setMinutes(0, 0, 0)
+    if (d.getTime() < from) d.setHours(d.getHours() + 1)
+    // Align to a multiple of the step within the local day (00:00, 06:00, 12:00…).
+    while (d.getHours() % step !== 0) d.setHours(d.getHours() + 1)
+    for (; d.getTime() <= to; d.setHours(d.getHours() + step)) out.push(d.getTime())
+    return out
+  }
+  const step = DAY_STEPS.find((n) => span / (n * DAY_MS) <= maxTicks) ?? Math.ceil(span / DAY_MS / maxTicks)
+  const d = new Date(from)
+  d.setHours(0, 0, 0, 0)
+  if (d.getTime() < from) d.setDate(d.getDate() + 1)
+  for (; d.getTime() <= to; d.setDate(d.getDate() + step)) out.push(d.getTime())
+  return out
+}
+
 export type LimitLevel = 'ok' | 'high' | 'crit'
 
 /** Meter colour band: below 70% ok, 70–89% getting full, 90% and up nearly full. */

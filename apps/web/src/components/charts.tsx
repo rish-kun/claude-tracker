@@ -1,8 +1,8 @@
 import { type ReactNode, useEffect, useId, useMemo, useState } from 'react'
 import { Bar, BarChart, CartesianGrid, Line, LineChart, ReferenceArea, ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
 import type { LimitSnapshot, Plan, Totals } from '../api/client'
-import { cellCost, formatDateTime, formatDayLong, formatDayTick, formatPct, formatTime, formatTokens, formatUSD, PLAN_LABELS } from '../lib/format'
-import { formatTimeTick, limitTimeline } from '../lib/limits'
+import { cellCost, formatDateTime, formatDayLong, formatDayTick, formatMoneyTick, formatPct, formatTime, formatTokens, formatUSD, moneyTicks, PLAN_LABELS } from '../lib/format'
+import { formatTimeTick, limitTimeline, timeTicks } from '../lib/limits'
 import { chartSummary, OTHER_KEY, type Pivot, rowTotal, unpricedAt } from '../lib/pivot'
 import { readTokens } from '../lib/tokens'
 import { CostFigure } from './figures'
@@ -26,6 +26,9 @@ export function useChartColors(): Record<ColorVar, string> {
   useEffect(() => {
     const mq = window.matchMedia('(prefers-color-scheme: dark)')
     const update = () => setColors(readColors())
+    // Re-read once mounted: on a cold load the first render can run before the stylesheet
+    // applies, leaving every colour empty (an invisible chart).
+    update()
     mq.addEventListener('change', update)
     return () => mq.removeEventListener('change', update)
   }, [])
@@ -121,11 +124,6 @@ function TableToggle({ open, onToggle, controls }: { open: boolean; onToggle: ()
 
 /* ───────── StackedDailyBars ───────── */
 
-/** Y-axis money ticks: whole dollars once the axis reaches $10, cents below that. */
-function moneyTick(max: number) {
-  return (v: number) => (max >= 10 ? `$${Math.round(v)}` : `$${v.toFixed(2)}`)
-}
-
 export function StackedDailyBars({
   pivot,
   format = formatUSD,
@@ -143,7 +141,8 @@ export function StackedDailyBars({
   const c = useChartColors()
   const [table, setTable] = useState(false)
   const tableId = useId()
-  const max = useMemo(() => Math.max(0, ...pivot.rows.map((r) => rowTotal(pivot, r))), [pivot])
+  const yTicks = useMemo(() => moneyTicks(Math.max(0, ...pivot.rows.map((r) => rowTotal(pivot, r)))), [pivot])
+  const yMax = yTicks[yTicks.length - 1]
   const ariaLabel = useMemo(() => chartSummary(title, pivot, format, (d) => formatDayTick(d)), [title, pivot, format])
   const colorOf = (key: string, i: number) => c[colorFor(key, i)]
 
@@ -168,7 +167,7 @@ export function StackedDailyBars({
       <ChartLegend items={pivot.keys.map((k, i) => ({ label: k.label, color: `var(${colorFor(k.key, i)})` }))} />
       <div className="chart-frame" role="img" aria-label={ariaLabel}>
         <ResponsiveContainer width="100%" height="100%">
-          <BarChart data={pivot.rows} barCategoryGap="20%" accessibilityLayer={false} margin={{ top: 4, right: 0, bottom: 0, left: 0 }}>
+          <BarChart data={pivot.rows} barCategoryGap="20%" accessibilityLayer={false} margin={{ top: 10, right: 0, bottom: 0, left: 0 }}>
             <CartesianGrid vertical={false} stroke={c['--grid']} />
             <XAxis
               dataKey="date"
@@ -182,7 +181,10 @@ export function StackedDailyBars({
               width={52}
               axisLine={false}
               tickLine={false}
-              tickFormatter={moneyTick(max)}
+              ticks={yTicks}
+              domain={[0, yMax]}
+              interval={0}
+              tickFormatter={(v: number) => formatMoneyTick(v, yMax)}
               tick={{ fill: c['--text-3'], fontSize: 12, fontFamily: 'Public Sans' }}
             />
             <Tooltip content={content} cursor={{ fill: c['--surface-2'] }} isAnimationActive={false} />
@@ -297,7 +299,7 @@ export function LimitTimeline({ limits }: { limits: LimitSnapshot[] }) {
       />
       <div className="chart-frame" data-kind="timeline" role="img" aria-label={ariaLabel}>
         <ResponsiveContainer width="100%" height="100%">
-          <LineChart data={points} accessibilityLayer={false} margin={{ top: 4, right: 8, bottom: 0, left: 0 }}>
+          <LineChart data={points} accessibilityLayer={false} margin={{ top: 10, right: 8, bottom: 0, left: 0 }}>
             <CartesianGrid vertical={false} stroke={c['--grid']} />
             <ReferenceArea y1={90} y2={100} fill={c['--meter-crit']} fillOpacity={0.08} ifOverflow="hidden" />
             <ReferenceLine y={70} stroke={c['--line-strong']} strokeDasharray="2 4" />
@@ -306,6 +308,7 @@ export function LimitTimeline({ limits }: { limits: LimitSnapshot[] }) {
               type="number"
               scale="time"
               domain={['dataMin', 'dataMax']}
+              ticks={timeTicks(domain)}
               tickFormatter={(t) => formatTimeTick(Number(t), span)}
               axisLine={false}
               tickLine={false}

@@ -15,6 +15,8 @@ import {
   formatUSD,
   PLAN_LABELS,
   unpricedTitle,
+  formatMoneyTick,
+  moneyTicks,
 } from './format'
 
 describe('format', () => {
@@ -106,5 +108,34 @@ describe('formatting rules (§4.7)', () => {
   })
   it('labels an unknown plan as not set', () => {
     expect(PLAN_LABELS.unknown).toBe('Plan not set')
+  })
+})
+
+describe('moneyTicks', () => {
+  it('uses round steps with at most five intervals', () => {
+    expect(moneyTicks(3.4)).toEqual([0, 1, 2, 3, 4])
+    expect(moneyTicks(8)).toEqual([0, 2, 4, 6, 8])
+    expect(moneyTicks(2.2)).toEqual([0, 0.5, 1, 1.5, 2, 2.5])
+    expect(moneyTicks(63.1)).toEqual([0, 20, 40, 60, 80])
+    expect(moneyTicks(0.3)).toEqual([0, 0.1, 0.2, 0.3])
+  })
+
+  it('always reaches the maximum', () => {
+    for (const max of [0.07, 0.9, 1, 4.99, 9.5, 10, 17, 140, 2300]) {
+      const t = moneyTicks(max)
+      expect(t[0]).toBe(0)
+      expect(t[t.length - 1]).toBeGreaterThanOrEqual(max)
+      expect(t.length - 1).toBeLessThanOrEqual(5)
+    }
+  })
+
+  it('has a usable axis when there is nothing to draw', () => {
+    expect(moneyTicks(0)).toEqual([0, 1])
+  })
+
+  it('labels dollars without cents from $10', () => {
+    expect(formatMoneyTick(0.5, 2.5)).toBe('$0.50')
+    expect(formatMoneyTick(20, 80)).toBe('$20')
+    expect(formatMoneyTick(2000, 2500)).toBe('$2,000')
   })
 })

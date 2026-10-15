@@ -155,6 +155,25 @@ export function formatReset(iso: string, now: number = Date.now(), o: DateOpts =
   return `Resets ${formatDayLong(iso, now, o)}, ${formatTime(iso, o)}`
 }
 
+/**
+ * Y-axis ticks for a cost chart: 0 up to at least `max` in round steps (1, 2, 2.5 or 5 × 10ⁿ),
+ * at most `maxIntervals` intervals. Below $10 every step is a multiple of $0.50 once the
+ * axis reaches $1.
+ */
+export function moneyTicks(max: number, maxIntervals = 5): number[] {
+  if (!(max > 0)) return [0, 1]
+  const raw = max / maxIntervals
+  const mag = 10 ** Math.floor(Math.log10(raw))
+  const step = [1, 2, 2.5, 5, 10].map((m) => m * mag).find((s) => s >= raw - 1e-12)!
+  const n = Math.ceil(max / step - 1e-9)
+  return Array.from({ length: n + 1 }, (_, i) => Math.round(i * step * 100) / 100)
+}
+
+/** Y-axis money label: whole dollars when the axis reaches $10, cents below that. */
+export function formatMoneyTick(v: number, axisMax: number): string {
+  return axisMax >= 10 ? `$${Math.round(v).toLocaleString('en-US')}` : `$${v.toFixed(2)}`
+}
+
 /** Chart axis day from a YYYY-MM-DD string, read as a local date (never shifted by UTC): "13 Oct". */
 export function formatDayTick(ymd: string, locale?: string): string {
   const [y, m, d] = ymd.split('-').map(Number)
