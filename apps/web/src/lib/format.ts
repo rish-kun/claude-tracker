@@ -5,11 +5,25 @@ function trim(n: number, digits: number): string {
   return n.toFixed(digits).replace(/\.?0+$/, '')
 }
 
+const TOKEN_UNITS = [
+  { div: 1e9, suffix: 'B', digits: 2 },
+  { div: 1e6, suffix: 'M', digits: 1 },
+  { div: 1e3, suffix: 'k', digits: 1 },
+] as const
+
+/** 950, 1.5k, 2M, 1.23B. A value that rounds up to 1000 of a unit moves to the next one (999,950 is "1M", not "1000k"). */
 export function formatTokens(n: number): string {
   const abs = Math.abs(n)
-  if (abs >= 1e9) return `${trim(n / 1e9, 2)}B`
-  if (abs >= 1e6) return `${trim(n / 1e6, 1)}M`
-  if (abs >= 1e3) return `${trim(n / 1e3, 1)}k`
+  for (let i = 0; i < TOKEN_UNITS.length; i++) {
+    const u = TOKEN_UNITS[i]
+    if (abs < u.div) continue
+    const text = trim(n / u.div, u.digits)
+    if (i > 0 && Math.abs(Number(text)) >= 1000) {
+      const up = TOKEN_UNITS[i - 1]
+      return `${trim(n / up.div, up.digits)}${up.suffix}`
+    }
+    return `${text}${u.suffix}`
+  }
   return String(n)
 }
 

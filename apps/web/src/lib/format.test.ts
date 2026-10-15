@@ -26,6 +26,13 @@ describe('format', () => {
     expect(formatTokens(2_000_000)).toBe('2M')
     expect(formatTokens(1_234_567_890)).toBe('1.23B')
   })
+  it('moves token counts to the next unit when rounding reaches 1000', () => {
+    expect(formatTokens(999_900)).toBe('999.9k')
+    expect(formatTokens(999_950)).toBe('1M')
+    expect(formatTokens(999_999)).toBe('1M')
+    expect(formatTokens(999_960_000)).toBe('1B')
+    expect(formatTokens(-999_999)).toBe('-1M')
+  })
   it('formats dollars', () => {
     expect(formatUSD(0)).toBe('$0.00')
     expect(formatUSD(3.456)).toBe('$3.46')

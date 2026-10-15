@@ -52,8 +52,9 @@ export interface LegendItem {
 export function ChartLegend({ items }: { items: LegendItem[] }) {
   return (
     <ul className="chart-legend" role="list">
-      {items.map((it) => (
-        <li key={it.label} className="legend-item">
+      {/* Keyed by position: two accounts can share a label. */}
+      {items.map((it, i) => (
+        <li key={i} className="legend-item">
           {it.dashed ? (
             <span className="swatch" data-dashed="" style={{ color: it.color }} aria-hidden="true" />
           ) : (
@@ -76,8 +77,8 @@ export function ChartTooltip({ title, rows, total, note }: { title: string; rows
   return (
     <div className="chart-tooltip">
       <div className="chart-tooltip-head">{title}</div>
-      {rows.map((r) => (
-        <div key={r.label} className="chart-tooltip-row">
+      {rows.map((r, i) => (
+        <div key={i} className="chart-tooltip-row">
           {r.color ? <span className="swatch" style={{ background: r.color }} /> : <span />}
           <span className="label">{r.label}</span>
           <span className="value">{r.value}</span>

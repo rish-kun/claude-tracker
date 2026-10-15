@@ -24,8 +24,9 @@ export function CostFigure({ totals, size = 'body' }: { totals: Pick<Totals, 'co
   const label = costLabel(totals)
   if (totals.unpriced_tokens > 0) {
     return (
-      <span className={cls} aria-label={`API-equivalent ${label}, excludes ${formatTokens(totals.unpriced_tokens)} unpriced tokens`}>
+      <span className={cls}>
         {label}
+        <span className="sr-only">, excludes {formatTokens(totals.unpriced_tokens)} unpriced tokens</span>
         <span className="unpriced-mark" title={unpricedTitle(totals.unpriced_tokens)} aria-hidden="true">
           +
         </span>

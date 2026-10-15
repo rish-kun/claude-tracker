@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import type { BreakdownRow, Session, Usage } from '../api/client'
+import type { BreakdownRow, Usage } from '../api/client'
 import { useMySessions, useMyUsage } from '../api/hooks'
 import { StackedDailyBars } from '../components/charts'
 import { CostFigure, TokenMix, UnpricedNote } from '../components/figures'
@@ -15,12 +15,15 @@ import { useRange } from '../lib/rangeContext'
 import { readTokens } from '../lib/tokens'
 import { usageSentence } from '../lib/usage'
 
-function PlanWindows({ usage, sessions, now }: { usage: Usage; sessions?: Session[]; now: number }) {
+/**
+ * No plan chip here: usage carries no account plans, and taking them from the paged
+ * session list made the chip come and go while paging.
+ */
+function PlanWindows({ usage, now }: { usage: Usage; now: number }) {
   const entries: LimitEntry[] = usage.limits.map((l) => ({
     accountId: l.account_id,
     limit: l,
     name: usage.by_account.find((r) => r.key === String(l.account_id))?.label,
-    plan: sessions?.find((s) => s.account?.id === l.account_id)?.account?.plan,
   }))
   return (
     <Section title="Plan windows" actions={<p className="section-desc">{GLOSSARY.planWindows.text}</p>}>
@@ -37,6 +40,7 @@ function PlanWindows({ usage, sessions, now }: { usage: Usage; sessions?: Sessio
 
 function Sentence({ usage }: { usage: Usage }) {
   const { preset } = useRange()
+  // Usage carries no account plans, so the note can't claim the usage is on flat-rate plans.
   const s = usageSentence(preset, usage.totals, usage.by_account.length)
   return (
     <div>
@@ -162,7 +166,7 @@ export function MyUsagePage() {
         {u && (
           <>
             <div className="area-limits">
-              <PlanWindows usage={u} sessions={sessions.data?.items} now={now} />
+              <PlanWindows usage={u} now={now} />
             </div>
             <div className="area-sentence">
               <Sentence usage={u} />
@@ -193,7 +197,14 @@ export function MyUsagePage() {
           description="All time, newest first. Select a session to see what drove its cost."
           className="area-ledger"
         >
-          <SessionLedger page={page} data={sessions.data} error={sessions.error} onPage={setPage} onRetry={() => void sessions.refetch()} />
+          <SessionLedger
+            page={page}
+            data={sessions.data}
+            stale={sessions.isPlaceholderData}
+            error={sessions.error}
+            onPage={setPage}
+            onRetry={() => void sessions.refetch()}
+          />
         </Section>
         <WhatTheseMean />
       </div>

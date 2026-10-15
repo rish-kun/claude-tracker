@@ -1470,6 +1470,12 @@
     margin-top: var(--s-3);
   }
 
+  /* The previous page's rows, shown while the next page loads. */
+  .ledger-entries[aria-busy='true'] {
+    opacity: 0.55;
+    transition: opacity var(--dur-1) var(--ease);
+  }
+
   .day-head {
     position: sticky;
     top: var(--sticky-top);

@@ -1,8 +1,10 @@
+import type { Plan } from '../api/client'
+
 /** One-line explanations for the terms the UI uses (§7). Shown as tooltips and in "What these mean". */
 export const GLOSSARY = {
   apiEquivalent: {
     term: 'API-equivalent cost',
-    text: "What this usage would cost at pay-as-you-go API prices. The team's Max plans are flat-rate, so nobody pays this; use it to compare sessions.",
+    text: 'What this usage would cost at pay-as-you-go API list prices; use it to compare sessions.',
   },
   read: {
     term: 'Read',
@@ -38,4 +40,19 @@ export type GlossaryKey = keyof typeof GLOSSARY
 /** The tooltip text for a term. */
 export function explain(k: GlossaryKey): string {
   return GLOSSARY[k].text
+}
+
+/**
+ * Whether the usage is known to be on flat-rate plans only: `plans` lists the plan of every
+ * account in the data, and none is billed per token (`api_key`). Unknown plans (`undefined`
+ * or an empty list) don't count as flat-rate, so the UI never claims nobody pays.
+ */
+export function allFlatRate(plans?: readonly Plan[]): boolean {
+  return plans !== undefined && plans.length > 0 && !plans.includes('api_key')
+}
+
+/** The API-equivalent tooltip, saying nobody pays it only when every account is on a flat-rate plan. */
+export function explainApiEquivalent(plans?: readonly Plan[]): string {
+  if (!allFlatRate(plans)) return GLOSSARY.apiEquivalent.text
+  return "What this usage would cost at pay-as-you-go API list prices. The team's Max plans are flat-rate, so nobody pays this; use it to compare sessions."
 }

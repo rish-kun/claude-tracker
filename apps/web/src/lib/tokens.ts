@@ -6,6 +6,19 @@ export function readTokens(t: Pick<Totals, 'input' | 'cache_write_5m' | 'cache_w
   return t.input + t.cache_write_5m + t.cache_write_1h + t.cache_read
 }
 
+/**
+ * Bar lengths (0–1) comparing each totals block with the largest. Cost is compared only when
+ * every block with usage has a priced cost; otherwise read tokens are, so a heavy but unpriced
+ * user isn't drawn as a sliver and all-unpriced usage doesn't draw every bar full width.
+ */
+export function barScales(ts: Totals[]): { by: 'cost' | 'read'; scales: number[] } {
+  const used = ts.filter((t) => t.cost_usd > 0 || readTokens(t) + t.output > 0)
+  const by = used.length > 0 && used.every((t) => t.cost_usd > 0) ? 'cost' : 'read'
+  const weight = (t: Totals) => (by === 'cost' ? t.cost_usd : readTokens(t))
+  const max = Math.max(0, ...ts.map(weight))
+  return { by, scales: ts.map((t) => (max > 0 ? weight(t) / max : 0)) }
+}
+
 /** What Claude produced. */
 export function writtenTokens(t: Pick<Totals, 'output'>): number {
   return t.output

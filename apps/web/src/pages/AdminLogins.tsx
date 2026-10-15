@@ -13,7 +13,7 @@ import { formatTokens, PLAN_LABELS } from '../lib/format'
 import { foldOther, markUnpriced, pivot, relabel } from '../lib/pivot'
 import { datesBetween } from '../lib/range'
 import { useRange } from '../lib/rangeContext'
-import { readTokens } from '../lib/tokens'
+import { barScales, readTokens } from '../lib/tokens'
 
 type LoginUsage = Schemas['LoginUsage']
 
@@ -33,6 +33,7 @@ function UserSessions({ userId, name }: { userId: number; name: string }) {
       variant="compact"
       page={page}
       data={sessions.data}
+      stale={sessions.isPlaceholderData}
       error={sessions.error}
       onPage={setPage}
       onRetry={() => void sessions.refetch()}
@@ -45,19 +46,19 @@ function UserSessions({ userId, name }: { userId: number; name: string }) {
 function PersonRow({
   u,
   columns,
-  maxCost,
+  scale,
   open,
   onToggle,
 }: {
   u: LoginUsage
   columns: AccountRef[]
-  maxCost: number
+  /** Bar length, 0–1, relative to the heaviest person (see `barScales`). */
+  scale: number
   open: boolean
   onToggle: () => void
 }) {
   const name = u.user.name || u.user.email
   const regionId = `person-sessions-${u.user.id}`
-  const priced = maxCost > 0
   return (
     <li className="person" id={personId(u.user.id)}>
       <div className="person-row">
@@ -67,7 +68,7 @@ function PersonRow({
           {u.user.name && <span className="person-email">{u.user.email}</span>}
         </button>
         <AccountSplitBar
-          scale={priced ? u.totals.cost_usd / maxCost : 1}
+          scale={scale}
           parts={u.by_account.map((a) => ({
             key: String(a.account.id),
             label: a.account.label || a.account.email || `Account ${a.account.id}`,
@@ -200,7 +201,7 @@ function Content() {
       </EmptyState>
     )
   }
-  const maxCost = Math.max(0, ...users.map((u) => u.totals.cost_usd))
+  const bars = barScales(users.map((u) => u.totals))
   const names = new Map(users.map((u) => [String(u.user.id), u.user.name || u.user.email]))
   const unpriced = users.reduce((n, u) => n + u.totals.unpriced_tokens, 0)
   const legend = columns.slice(0, 5).map((c, i) => ({ label: `${c.label || c.email || `Account ${c.id}`} (${PLAN_LABELS[c.plan]})`, color: `var(${seriesVar(String(c.id), i)})` }))
@@ -212,15 +213,22 @@ function Content() {
 
   return (
     <>
-      <Section title="People" description="API-equivalent cost in the range, split by the Claude account it ran on. Open a person to see their sessions.">
+      <Section
+        title="People"
+        description={
+          bars.by === 'cost'
+            ? 'API-equivalent cost in the range, split by the Claude account it ran on. Open a person to see their sessions.'
+            : "Usage in the range, split by the Claude account it ran on. Bars compare tokens read, since some usage isn't priced. Open a person to see their sessions."
+        }
+      >
         <ChartLegend items={legend} />
         <ul className="people" role="list">
-          {users.map((u) => (
+          {users.map((u, i) => (
             <PersonRow
               key={u.user.id}
               u={u}
               columns={columns}
-              maxCost={maxCost}
+              scale={bars.scales[i]}
               open={open === u.user.id}
               onToggle={() => setOpen(open === u.user.id ? null : u.user.id)}
             />

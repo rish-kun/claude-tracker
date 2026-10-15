@@ -1,11 +1,12 @@
-import { Link, useParams } from '@tanstack/react-router'
-import type { ReactNode } from 'react'
+import { Link, useNavigate, useParams } from '@tanstack/react-router'
+import { type ReactNode, useEffect } from 'react'
 import { ApiError, type SessionDetail, type SessionPart } from '../api/client'
 import { useMe, useSession } from '../api/hooks'
+import { isUnauthorized, LOGIN_PATH } from '../api/unauthorized'
 import { AccountName, CostFigure, Fact, FactList, PlanChip, TokenMix } from '../components/figures'
 import { CopyButton, EmptyState, ErrorNotice, Glyph, Section, Skeleton } from '../components/ui'
 import { formatCount, formatDayLong, formatDuration, formatShare, formatTime, formatTokens } from '../lib/format'
-import { explain } from '../lib/glossary'
+import { explain, explainApiEquivalent } from '../lib/glossary'
 import { useNow } from '../lib/rangeContext'
 import { avgContext, costDrivers, readTokens, sessionLabel, shortenPath } from '../lib/sessions'
 
@@ -23,11 +24,16 @@ function BackLink({ toMine }: { toMine: boolean }) {
   )
 }
 
+/** The API-equivalent tooltip for this session's account (it says nobody pays only on a flat-rate plan). */
+function apiEquivalentTitle(d: SessionDetail): string {
+  return explainApiEquivalent(d.session.account ? [d.session.account.plan] : undefined)
+}
+
 function HeadlineFigures({ d }: { d: SessionDetail }) {
   const t = d.session.totals
   return (
     <dl className="headline-figs">
-      <div className="headline-fig" title={explain('apiEquivalent')}>
+      <div className="headline-fig" title={apiEquivalentTitle(d)}>
         <dt>API-equivalent</dt>
         <dd>
           <CostFigure totals={t} size="fig-lg" />
@@ -64,7 +70,7 @@ function SessionAnatomy({ d }: { d: SessionDetail }) {
   const rows: { label: string; title: string; cell: (p: SessionPart) => ReactNode }[] = [
     {
       label: 'API-equivalent',
-      title: explain('apiEquivalent'),
+      title: apiEquivalentTitle(d),
       cell: (p) => (
         <>
           <CostFigure totals={p.totals} />
@@ -264,6 +270,13 @@ export function SessionDetailPage() {
   const me = useMe()
   const q = useSession(sessionId)
   const isAdmin = me.data?.is_admin === true
+  const navigate = useNavigate()
+  // A 401 means the sign-in has gone: go to /login, as the app shell does for /me,
+  // and keep showing the loading state rather than an error until it navigates.
+  const unauthorized = isUnauthorized(q.error)
+  useEffect(() => {
+    if (unauthorized) void navigate({ to: LOGIN_PATH })
+  }, [unauthorized, navigate])
 
   if (q.data) return <Detail d={q.data} isAdmin={isAdmin} mine={q.data.session.user.id === me.data?.id} />
 
@@ -284,7 +297,7 @@ export function SessionDetailPage() {
       </>
     )
   }
-  if (q.error) {
+  if (q.error && !unauthorized) {
     return (
       <>
         <BackLink toMine />

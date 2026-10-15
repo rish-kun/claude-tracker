@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { Schemas, Session, Totals } from '../api/client'
-import { avgContext, basename, costDrivers, groupByDay, sessionLabel, shortenPath } from './sessions'
+import { avgContext, basename, costDrivers, groupByDay, lastPage, pageRange, sessionLabel, shortenPath } from './sessions'
 
 const zero: Totals = { input: 0, output: 0, cache_write_5m: 0, cache_write_1h: 0, cache_read: 0, total_tokens: 0, cost_usd: 0, unpriced_tokens: 0 }
 const t = (o: Partial<Totals>): Totals => {
@@ -147,5 +147,21 @@ describe('costDrivers', () => {
   it('averages context per call', () => {
     expect(avgContext({ calls: 0, totals: zero })).toBe(0)
     expect(avgContext({ calls: 4, totals: t({ cache_read: 10 }) })).toBe(3)
+  })
+})
+
+describe('pageRange / lastPage', () => {
+  it('counts the rows actually on the page', () => {
+    expect(pageRange(0, 20, 20)).toEqual({ from: 1, to: 20 })
+    expect(pageRange(2, 20, 5)).toEqual({ from: 41, to: 45 })
+  })
+  it('has no range for an empty page, so from never exceeds to', () => {
+    expect(pageRange(3, 20, 0)).toBeNull()
+  })
+  it('finds the last page with rows', () => {
+    expect(lastPage(0, 20)).toBe(0)
+    expect(lastPage(20, 20)).toBe(0)
+    expect(lastPage(21, 20)).toBe(1)
+    expect(lastPage(45, 20)).toBe(2)
   })
 })

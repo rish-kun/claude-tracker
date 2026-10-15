@@ -1,10 +1,10 @@
 import { Link } from '@tanstack/react-router'
-import { type ReactNode, useId, useRef } from 'react'
+import { type ReactNode, useEffect, useId, useRef } from 'react'
 import type { Session, SessionPage } from '../api/client'
 import { PAGE_SIZE } from '../api/hooks'
 import { costLabel, formatDayLong, formatDuration, formatTime, formatTokens } from '../lib/format'
 import { useNow } from '../lib/rangeContext'
-import { groupByDay, readTokens, sessionLabel, shortenPath } from '../lib/sessions'
+import { groupByDay, lastPage, pageRange, readTokens, sessionLabel, shortenPath } from '../lib/sessions'
 import { WeightBar } from './charts'
 import { CostFigure, Fact, FactList, PlanChip } from './figures'
 import { Button, EmptyState, ErrorNotice, Skeleton } from './ui'
@@ -101,18 +101,16 @@ export function SessionRow({ s, showUser, maxCost, compact = false }: { s: Sessi
   )
 }
 
-export function Pager({ page, total, pageSize, onPage }: { page: number; total: number; pageSize: number; onPage: (p: number) => void }) {
-  const from = total === 0 ? 0 : page * pageSize + 1
-  const to = Math.min(total, (page + 1) * pageSize)
+/** `count` is the number of rows on this page; the range is taken from it, so it never reads from > to. */
+export function Pager({ page, total, count, pageSize, onPage }: { page: number; total: number; count: number; pageSize: number; onPage: (p: number) => void }) {
+  const r = pageRange(page, pageSize, count)
   return (
     <nav className="pager" aria-label="Session pages">
       <Button variant="secondary" disabled={page === 0} onClick={() => onPage(page - 1)}>
         Newer
       </Button>
-      <span className="range">
-        {from}–{to} of {total}
-      </span>
-      <Button variant="secondary" disabled={to >= total} onClick={() => onPage(page + 1)}>
+      <span className="range">{r ? `${r.from}–${r.to} of ${Math.max(total, r.to)}` : `No sessions on this page (${total} in all)`}</span>
+      <Button variant="secondary" disabled={!r || r.to >= total} onClick={() => onPage(page + 1)}>
         Older
       </Button>
     </nav>
@@ -147,9 +145,15 @@ export function SessionLedger({
   onRetry,
   errorWhat = 'load your sessions',
   empty,
+  stale = false,
 }: {
   data?: SessionPage
   error?: Error | null
+  /**
+   * `data` is the previous page's, shown while `page` loads (the query's isPlaceholderData):
+   * the rows are dimmed and marked busy until the new page arrives.
+   */
+  stale?: boolean
   page: number
   onPage: (p: number) => void
   showUser?: boolean
@@ -161,6 +165,12 @@ export function SessionLedger({
   const now = useNow()
   const top = useRef<HTMLDivElement>(null)
   const err = error ? <ErrorNotice what={errorWhat} error={error} onRetry={onRetry} /> : null
+  // A page past the end (sessions were removed since it was opened): step back to the last page with rows.
+  const pastEnd = data !== undefined && !stale && data.items.length === 0 && page > 0
+  const backTo = data ? lastPage(data.total, PAGE_SIZE) : 0
+  useEffect(() => {
+    if (pastEnd && backTo !== page) onPage(backTo)
+  }, [pastEnd, backTo, page, onPage])
   if (!data) return err ?? <LedgerSkeleton />
   if (data.items.length === 0 && page === 0) {
     return (
@@ -180,14 +190,16 @@ export function SessionLedger({
   return (
     <div ref={top} className="ledger-list">
       {err}
-      {groupByDay(data.items, now).map((g) => (
-        <DayGroup key={`${g.label}-${g.items[0].session_id}`} label={g.label}>
-          {g.items.map((s) => (
-            <SessionRow key={s.session_id} s={s} showUser={showUser} maxCost={maxCost} compact={variant === 'compact'} />
-          ))}
-        </DayGroup>
-      ))}
-      <Pager page={page} total={data.total} pageSize={PAGE_SIZE} onPage={go} />
+      <div className="ledger-entries" aria-busy={stale || undefined}>
+        {groupByDay(data.items, now).map((g) => (
+          <DayGroup key={`${g.label}-${g.items[0].session_id}`} label={g.label}>
+            {g.items.map((s) => (
+              <SessionRow key={s.session_id} s={s} showUser={showUser} maxCost={maxCost} compact={variant === 'compact'} />
+            ))}
+          </DayGroup>
+        ))}
+      </div>
+      <Pager page={page} total={data.total} count={data.items.length} pageSize={PAGE_SIZE} onPage={go} />
     </div>
   )
 }

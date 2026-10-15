@@ -1,5 +1,6 @@
-import type { Totals } from '../api/client'
+import type { Plan, Totals } from '../api/client'
 import { costLabel, formatTokens } from './format'
+import { allFlatRate } from './glossary'
 import { type Preset, RANGE_PHRASE } from './range'
 import { readTokens } from './tokens'
 
@@ -16,8 +17,12 @@ export function runsText(runs: (string | { fig: string } | { cmd: string })[]): 
   return runs.map((r) => (typeof r === 'string' ? r : 'fig' in r ? r.fig : r.cmd)).join('')
 }
 
-/** The My usage summary sentence (§4.1) as runs, so figures can be styled. */
-export function usageSentence(preset: Preset, totals: Totals, accounts: number): UsageSentence {
+/**
+ * The My usage summary sentence (§4.1) as runs, so figures can be styled. `plans` lists the
+ * plan of every account in the usage, when known; the note says nobody pays the API-equivalent
+ * only when none of them is billed per token (see `allFlatRate`).
+ */
+export function usageSentence(preset: Preset, totals: Totals, accounts: number, plans?: readonly Plan[]): UsageSentence {
   const phrase = RANGE_PHRASE[preset]
   const read = readTokens(totals)
   const written = totals.output
@@ -41,7 +46,9 @@ export function usageSentence(preset: Preset, totals: Totals, accounts: number):
   } else {
     runs.push('At pay-as-you-go API prices that would be ', { fig: costLabel(totals) }, '.')
   }
-  let note = "API-equivalent only. The team's Max plans are flat-rate, so nobody pays this."
+  let note = allFlatRate(plans)
+    ? "API-equivalent only. The team's Max plans are flat-rate, so nobody pays this."
+    : "API-equivalent only: what this usage would cost at API list prices."
   if (totals.unpriced_tokens > 0) note += ` Excludes ${formatTokens(totals.unpriced_tokens)} tokens from models without a price.`
   return { runs, note: [note] }
 }

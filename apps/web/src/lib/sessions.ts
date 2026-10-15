@@ -137,3 +137,18 @@ export function costDrivers(d: SessionDetail): string[] {
   }
   return out.slice(0, 3)
 }
+
+/**
+ * The "from–to" a session pager shows for page `page` holding `count` rows: 1-based and never
+ * from > to. `null` when the page has no rows (it was emptied by deletions, or is past the end).
+ */
+export function pageRange(page: number, pageSize: number, count: number): { from: number; to: number } | null {
+  if (count <= 0) return null
+  const from = page * pageSize + 1
+  return { from, to: from + count - 1 }
+}
+
+/** The last page (0-based) that has rows for `total` rows; 0 when there are none. */
+export function lastPage(total: number, pageSize: number): number {
+  return Math.max(0, Math.ceil(total / pageSize) - 1)
+}
