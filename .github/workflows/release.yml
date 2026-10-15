@@ -1,0 +1,57 @@
+name: release
+on:
+  push:
+    tags: ["cli-v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: aarch64-apple-darwin, os: macos-latest }
+          - { target: x86_64-apple-darwin, os: macos-latest }
+          - { target: x86_64-unknown-linux-musl, os: ubuntu-latest }
+          - { target: aarch64-unknown-linux-musl, os: ubuntu-24.04-arm }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install target
+        run: |
+          rustup target add ${{ matrix.target }}
+          if [ "${{ runner.os }}" = Linux ]; then sudo apt-get update && sudo apt-get install -y musl-tools; fi
+      - name: Build
+        working-directory: apps/cli
+        run: cargo build --release --locked --target ${{ matrix.target }}
+      - name: Package
+        run: |
+          name=cctrack-${{ matrix.target }}
+          bin=apps/cli/target/${{ matrix.target }}/release/cctrack
+          file "$bin"
+          [ "${{ runner.os }}" = macOS ] && otool -L "$bin" || true
+          tar -czf "$name.tar.gz" -C "$(dirname "$bin")" cctrack
+          shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cctrack-${{ matrix.target }}
+          path: cctrack-${{ matrix.target }}.tar.gz*
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+        run: gh release create "$TAG" dist/* --repo "$REPO" --title "cctrack $TAG" --generate-notes

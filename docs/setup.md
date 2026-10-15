@@ -53,11 +53,28 @@ Create a Neon project (or connect Neon through the Vercel marketplace). You need
 
 ## 4. Install the CLI (each developer)
 
+`cctrack` is a single self-contained binary: no Rust toolchain, runtime or OpenSSL is needed.
+Download the build for your machine from the repo's GitHub Releases and put it in `~/.local/bin`:
+
+| Machine | Release asset |
+|---|---|
+| macOS, Apple silicon | `cctrack-aarch64-apple-darwin.tar.gz` |
+| macOS, Intel | `cctrack-x86_64-apple-darwin.tar.gz` |
+| Linux x86_64 (static) | `cctrack-x86_64-unknown-linux-musl.tar.gz` |
+| Linux arm64 (static) | `cctrack-aarch64-unknown-linux-musl.tar.gz` |
+
 ```bash
-git clone <this repo> && cd <repo>
-cargo install --path apps/cli
+# The repo is private, so download with an authenticated gh (or from the Releases page).
+gh release download --repo <github-org>/<repo> --pattern 'cctrack-aarch64-apple-darwin.tar.gz'
+mkdir -p ~/.local/bin && tar -xzf cctrack-aarch64-apple-darwin.tar.gz -C ~/.local/bin
 cctrack login --server https://cctrack.example.com
 ```
+If you downloaded it with a browser, macOS quarantines the file; clear that with
+`xattr -d com.apple.quarantine ~/.local/bin/cctrack`. Each asset has a `.sha256` file next to it.
+
+A maintainer publishes a release by pushing a tag such as `cli-v0.1.0` (the
+`release` workflow builds every target). To build from source instead, run
+`cargo install --path apps/cli` (needs Rust 1.89+).
 On a machine without a browser, sign in the first time with
 `cctrack login --server https://cctrack.example.com --paste` (afterwards `cctrack login --paste`
 is enough). Check with `cctrack status`.

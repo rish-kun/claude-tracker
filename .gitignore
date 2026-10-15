@@ -3,6 +3,7 @@ apps/server/.env
 apps/server/bin/
 # Rust
 apps/cli/target/
+/dist/
 # Web
 apps/web/node_modules/
 apps/web/dist/
@@ -15,3 +16,4 @@ apps/web/dist/
 .neon
 .env.local
 node_modules/
+.env.vercel

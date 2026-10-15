@@ -33,7 +33,7 @@ if [ -z "$bin" ]; then
 fi
 
 if [ -z "$bin" ] || [ ! -x "$bin" ]; then
-  [ "$gate" -eq 1 ] && block "cctrack is not installed or not found. Install it (cargo install --path apps/cli from the cctrack repo) or set CCTRACK_BIN to its path, then run 'cctrack login'."
+  [ "$gate" -eq 1 ] && block "cctrack is not installed or not found. Download the cctrack binary from the repo's GitHub Releases into ~/.local/bin (see docs/setup.md) or set CCTRACK_BIN to its path, then run 'cctrack login'."
   exit 0
 fi
 
