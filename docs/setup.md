@@ -140,7 +140,8 @@ relies on TypeScript 5's compiler API.
 
 Per assistant response: session id, message id, model, timestamp, token counts
 (input, output, cache writes, cache reads), speed, and whether it came from a subagent;
-per session: working directory, git branch, device hostname, and an optional 1–2 line
-summary written by a Haiku subagent. Prompts, responses and file contents never leave
-the machine. Plan-limit percentages come from Claude Code's cached utilisation in
+per session: working directory, git branch, device hostname, Claude Code's session
+title (the short name Claude Code gives the session, not the prompts themselves), and an
+optional 1–2 line summary written by a Haiku subagent. Prompts, responses and file
+contents never leave the machine. Plan-limit percentages come from Claude Code's cached utilisation in
 `~/.claude.json`, which is undocumented and may be missing.
