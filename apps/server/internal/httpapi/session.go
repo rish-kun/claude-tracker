@@ -3,6 +3,7 @@ package httpapi
 import (
 	"errors"
 	"net/http"
+	"unicode/utf8"
 
 	"cctrack/server/internal/api"
 	"cctrack/server/internal/pricing"
@@ -23,10 +24,11 @@ func (s *Server) GetSession(w http.ResponseWriter, r *http.Request, sessionId st
 		return
 	}
 	// Every refusal is the same 404, so a session id is never confirmed to
-	// exist for someone who may not see it. A NUL id cannot exist (Postgres
-	// text rejects it) and would otherwise surface as a 500.
+	// exist for someone who may not see it. Ids ingest could never store (NUL
+	// or invalid UTF-8, which Postgres text rejects, or over 100 bytes) are
+	// 404 too, not a 500.
 	notFound := func() { writeError(w, http.StatusNotFound, "session not found") }
-	if hasNUL(sessionId) {
+	if hasNUL(sessionId) || !utf8.ValidString(sessionId) || len(sessionId) > 100 {
 		notFound()
 		return
 	}

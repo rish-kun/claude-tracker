@@ -130,6 +130,53 @@ func TestIngestSessionTitleUpsert(t *testing.T) {
 	}
 }
 
+// TestIngestTitleOnlyUpdate: the CLI's title-only update (no cwd, branch,
+// accounts or entries) sets the title and leaves everything else alone.
+func TestIngestTitleOnlyUpdate(t *testing.T) {
+	st := store.New(testdb.New(t))
+	ctx := context.Background()
+	uid := newUser(t, st, "dev@example.com")
+	full := batch("s1", nil, ingestEntry("m1", "claude-opus-4-5", false, 1, 1, 0, 0, 0))
+	full.Sessions[0].GitBranch = strp("main")
+	if _, err := st.Ingest(ctx, uid, full); err != nil {
+		t.Fatal(err)
+	}
+	before, err := st.SessionByID(ctx, "s1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	titleOnly := &api.IngestRequest{
+		Device:   api.Device{Hostname: "laptop", Os: "macos"},
+		Accounts: []api.IngestAccount{},
+		Sessions: []api.IngestSession{{SessionId: "s1", Title: strp("Renamed"), StartedAt: ts0, EndedAt: ts0}},
+		Entries:  []api.IngestEntry{},
+	}
+	if _, err := st.Ingest(ctx, uid, titleOnly); err != nil {
+		t.Fatal(err)
+	}
+	after, err := st.SessionByID(ctx, "s1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Title == nil || *after.Title != "Renamed" {
+		t.Fatalf("title = %v", after.Title)
+	}
+	after.Title = before.Title
+	if before.AccountID == nil || after.AccountID == nil || *before.AccountID != *after.AccountID ||
+		derefS(after.Cwd) != derefS(before.Cwd) || derefS(after.Project) != derefS(before.Project) ||
+		derefS(after.GitBranch) != "main" || !after.StartedAt.Equal(before.StartedAt) ||
+		!after.EndedAt.Equal(before.EndedAt) {
+		t.Fatalf("title-only update changed the session:\nbefore %+v\nafter  %+v", before, after)
+	}
+}
+
+func derefS(s *string) string {
+	if s == nil {
+		return ""
+	}
+	return *s
+}
+
 // TestSessionAggregate: rows are split by subagent flag and model, with the
 // entry count and the largest single prompt of each group.
 func TestSessionAggregate(t *testing.T) {

@@ -82,6 +82,9 @@ func TestGetSessionAccess(t *testing.T) {
 	if rec := h.do("GET", "/api/sessions/bad%00id", nil, bearer(alice)); rec.Code != http.StatusNotFound {
 		t.Fatalf("NUL id: %d %s", rec.Code, rec.Body)
 	}
+	if rec := h.do("GET", "/api/sessions/bad%FFid", nil, bearer(alice)); rec.Code != http.StatusNotFound {
+		t.Fatalf("invalid UTF-8 id: %d %s", rec.Code, rec.Body)
+	}
 }
 
 func TestGetSessionDetail(t *testing.T) {
