@@ -11,6 +11,11 @@ pub struct Paths {
     pub state_dir: PathBuf,
     pub claude_dir: PathBuf,
     pub claude_json: PathBuf,
+    /// CLIProxyAPI's home (`~/.cli-proxy-api`, or `CCTRACK_CLIPROXY_DIR`):
+    /// its `logs/main.log` names the pool account that served each request.
+    pub cliproxy_dir: PathBuf,
+    /// Claude Code's managed (enterprise) settings file.
+    pub managed_settings: PathBuf,
 }
 
 impl Paths {
@@ -30,7 +35,8 @@ impl Paths {
             Some(d) => (d.clone(), d.join(".claude.json")),
             None => (home.join(".claude"), home.join(".claude.json")),
         };
-        Ok(Self { config_dir, state_dir, claude_dir, claude_json })
+        let cliproxy_dir = env("CCTRACK_CLIPROXY_DIR").unwrap_or_else(|| home.join(".cli-proxy-api"));
+        Ok(Self { config_dir, state_dir, claude_dir, claude_json, cliproxy_dir, managed_settings: managed_settings_path() })
     }
 
     /// Every location inside `root`; used by tests.
@@ -40,9 +46,13 @@ impl Paths {
             state_dir: root.join("state"),
             claude_dir: root.join("claude"),
             claude_json: root.join("claude.json"),
+            cliproxy_dir: root.join("cli-proxy-api"),
+            managed_settings: root.join("managed-settings.json"),
         }
     }
 
+    /// The saved proxy mode (`cctrack proxy auto|on|off`).
+    pub fn proxy_config(&self) -> PathBuf { self.config_dir.join("proxy.json") }
     pub fn credentials(&self) -> PathBuf { self.config_dir.join("credentials.json") }
     pub fn credentials_lock(&self) -> PathBuf { self.config_dir.join("credentials.lock") }
     pub fn offsets(&self) -> PathBuf { self.state_dir.join("offsets.json") }
@@ -66,12 +76,29 @@ impl Paths {
     pub fn quarantine(&self) -> PathBuf { self.state_dir.join("quarantine.json") }
     pub fn sync_log(&self) -> PathBuf { self.state_dir.join("sync.log") }
     pub fn projects_dir(&self) -> PathBuf { self.claude_dir.join("projects") }
+    /// Per-session sync state: titles seen and sent, uploaded time range,
+    /// pool accounts seen (see `sync::SessionStates`). Written only under `sync.lock`.
+    pub fn sessions(&self) -> PathBuf { self.state_dir.join("sessions.json") }
+    /// Markers of sessions that run through a local CLIProxyAPI pool, one
+    /// file per session (written by hooks, read by syncs).
+    pub fn proxy_sessions_dir(&self) -> PathBuf { self.state_dir.join("proxy-sessions") }
 
     /// Stable short key for the Claude config dir: the first 6 bytes of
     /// sha256 of the `.claude.json` path, as hex.
     fn claude_key(&self) -> String {
         let digest = Sha256::digest(self.claude_json.to_string_lossy().as_bytes());
         digest[..6].iter().map(|b| format!("{b:02x}")).collect()
+    }
+}
+
+/// Where Claude Code reads managed settings on this OS.
+fn managed_settings_path() -> PathBuf {
+    if cfg!(target_os = "macos") {
+        PathBuf::from("/Library/Application Support/ClaudeCode/managed-settings.json")
+    } else if cfg!(windows) {
+        PathBuf::from(r"C:\ProgramData\ClaudeCode\managed-settings.json")
+    } else {
+        PathBuf::from("/etc/claude-code/managed-settings.json")
     }
 }
 

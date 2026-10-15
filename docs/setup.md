@@ -83,6 +83,18 @@ The plugin runs `cctrack` only from `~/.cargo/bin`, `/opt/homebrew/bin`, `/usr/l
 `~/.local/bin` (never from an arbitrary `PATH` entry). If you installed it elsewhere, set
 `CCTRACK_BIN` to its full path in the environment Claude Code starts from.
 
+If you run Claude Code through a local [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI)
+pool (`ANTHROPIC_BASE_URL` pointing at `127.0.0.1`/`localhost` or the proxy's port), usage is
+credited to the pool account that served each request, read from the proxy's log
+(`~/.cli-proxy-api/logs/main.log`; set `CCTRACK_CLIPROXY_DIR` if it lives elsewhere), not to the
+account you are signed in with. Only each pool account's id, email and organization are read from
+its auth file; its tokens are never kept, printed or uploaded. Set each pool account's plan
+in the dashboard's Settings. `cctrack proxy status` shows what is detected and the pool accounts;
+`cctrack proxy auto|on|off` sets the mode (`auto`, the default, detects per session from Claude
+Code's environment and settings files; `on` treats every session as proxied; `off` never credits pool
+accounts), and `CCTRACK_PROXY_MODE` overrides it. `cctrack sync --dry-run` prints each session's
+attribution without uploading.
+
 ## 5. Enable the Claude Code plugin (each developer)
 
 In Claude Code:
@@ -140,7 +152,8 @@ relies on TypeScript 5's compiler API.
 
 Per assistant response: session id, message id, model, timestamp, token counts
 (input, output, cache writes, cache reads), speed, and whether it came from a subagent;
-per session: working directory, git branch, device hostname, and an optional 1–2 line
-summary written by a Haiku subagent. Prompts, responses and file contents never leave
+per session: working directory, git branch, device hostname, the session title Claude Code
+generated (or the one you set with `/rename`), and an optional 1–2 line summary written by a
+Haiku subagent. Prompts, responses and file contents never leave
 the machine. Plan-limit percentages come from Claude Code's cached utilisation in
 `~/.claude.json`, which is undocumented and may be missing.

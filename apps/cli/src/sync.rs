@@ -1,23 +1,25 @@
 //! Upload new transcript usage: lock → scan → batch → upload → advance offsets.
 
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use anyhow::{Result, anyhow, bail};
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Local, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::claude_json::{self, ClaudeState, OAuthAccount, UsageSnapshot};
 use crate::client::{ApiClient, ApiError};
 use crate::credentials::{self, Credentials};
 use crate::paths::Paths;
-use crate::scan::{self, Offsets, Position};
+use crate::proxy::{self, LogWindow, PoolResolver, ProxyMode, SessionProxy};
+use crate::scan::{self, Offsets, Position, TranscriptFile};
+use crate::sessions::{self, SessionStates};
 use crate::state::{lock_file, read_json, write_json_atomic};
 use crate::timeline::{self, Timeline};
-use crate::transcript::{self, UsageEntry};
+use crate::transcript::{self, TitleLine, UsageEntry};
 use crate::wire::{API_KEY_ACCOUNT, Device, IngestAccount, IngestEntry, IngestRequest, IngestSession, LimitSnapshotIn};
 
 pub const BATCH_ENTRIES: usize = 1500;
@@ -46,6 +48,8 @@ pub struct SyncReport {
     /// Sessions the server deterministically rejected during this run; their
     /// entries were dropped and they will not be sent again.
     pub quarantined: Vec<String>,
+    /// Session titles sent on their own (without new usage).
+    pub titles_sent: usize,
 }
 
 /// Appends a timestamped line to `sync.log` (best effort).
@@ -114,10 +118,62 @@ fn to_wire(a: &OAuthAccount) -> IngestAccount {
     }
 }
 
-/// The account an entry is attributed to: the timeline at its timestamp,
-/// falling back to the current account. None means API-key auth.
-fn account_for<'a>(timeline: &'a Timeline, claude: &'a ClaudeState, ts: DateTime<Utc>) -> Option<&'a OAuthAccount> {
-    timeline.account_at(ts).unwrap_or(claude.account.as_ref())
+fn api_key_account() -> IngestAccount {
+    IngestAccount { account_uuid: API_KEY_ACCOUNT.into(), org_uuid: None, email: None, org_type: None, rate_limit_tier: None }
+}
+
+/// How a proxied entry's pool account was chosen.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PoolHow {
+    /// A CLIProxyAPI log line for the same session (first character) and
+    /// model, started shortly before the entry.
+    Matched,
+    /// No line matched: the pool account that served most of the session.
+    SessionUsual,
+}
+
+/// The CLIProxyAPI pool account that served an entry.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PoolHit {
+    pub account: IngestAccount,
+    /// Its auth file name in the proxy home.
+    pub auth: String,
+    pub how: PoolHow,
+}
+
+/// Decides each entry's account: the pool account that served it when the
+/// session ran through a CLIProxyAPI pool, else the account timeline at the
+/// entry's timestamp, falling back to the current `oauthAccount`, else API key.
+pub struct Attributor<'a> {
+    pub timeline: &'a Timeline,
+    pub claude: &'a ClaudeState,
+    /// Pool accounts by message id.
+    pub pool: HashMap<String, PoolHit>,
+}
+
+impl<'a> Attributor<'a> {
+    pub fn new(timeline: &'a Timeline, claude: &'a ClaudeState) -> Self {
+        Self { timeline, claude, pool: HashMap::new() }
+    }
+
+    pub fn account(&self, e: &UsageEntry) -> IngestAccount {
+        self.explain(e).0
+    }
+
+    /// The account and how it was chosen.
+    pub fn explain(&self, e: &UsageEntry) -> (IngestAccount, &'static str) {
+        if let Some(hit) = self.pool.get(&e.message_id) {
+            let how = match hit.how {
+                PoolHow::Matched => "CLIProxyAPI log",
+                PoolHow::SessionUsual => "session's usual pool account",
+            };
+            return (hit.account.clone(), how);
+        }
+        match self.timeline.account_at(e.ts).unwrap_or(self.claude.account.as_ref()) {
+            Some(a) => (to_wire(a), "Claude account (~/.claude.json)"),
+            None => (api_key_account(), "API key"),
+        }
+    }
 }
 
 /// Builds one ingest request. Each entry's account comes from the timeline at
@@ -129,28 +185,27 @@ pub fn build_request(
     claude: &ClaudeState,
     snapshot: Option<&UsageSnapshot>,
 ) -> IngestRequest {
+    build_request_with(device, entries, &Attributor::new(timeline, claude), &BTreeMap::new(), snapshot)
+}
+
+/// Builds one ingest request, attributing entries with `attr` and attaching
+/// `titles` (by session id) to the sessions in it.
+pub fn build_request_with(
+    device: &Device,
+    entries: &[UsageEntry],
+    attr: &Attributor,
+    titles: &BTreeMap<String, String>,
+    snapshot: Option<&UsageSnapshot>,
+) -> IngestRequest {
+    let claude = attr.claude;
     let mut accounts: BTreeMap<String, IngestAccount> = BTreeMap::new();
     let mut sessions: BTreeMap<String, IngestSession> = BTreeMap::new();
     let mut wire_entries = Vec::with_capacity(entries.len());
 
     for e in entries {
-        let account = account_for(timeline, claude, e.ts).cloned();
-        let account_uuid = match account {
-            Some(a) => {
-                accounts.entry(a.account_uuid.clone()).or_insert_with(|| to_wire(&a));
-                a.account_uuid
-            }
-            None => {
-                accounts.entry(API_KEY_ACCOUNT.into()).or_insert_with(|| IngestAccount {
-                    account_uuid: API_KEY_ACCOUNT.into(),
-                    org_uuid: None,
-                    email: None,
-                    org_type: None,
-                    rate_limit_tier: None,
-                });
-                API_KEY_ACCOUNT.into()
-            }
-        };
+        let account = attr.account(e);
+        let account_uuid = account.account_uuid.clone();
+        accounts.entry(account_uuid.clone()).or_insert(account);
         sessions
             .entry(e.session_id.clone())
             .and_modify(|s| {
@@ -173,6 +228,7 @@ pub fn build_request(
                 git_branch: e.git_branch.clone(),
                 started_at: e.ts,
                 ended_at: e.ts,
+                title: titles.get(&e.session_id).cloned(),
             });
         wire_entries.push(IngestEntry {
             session_id: e.session_id.clone(),
@@ -256,8 +312,11 @@ struct Uploader<'a> {
     creds: &'a Credentials,
     client: &'a ApiClient,
     device: Device,
-    timeline: &'a Timeline,
-    claude: &'a ClaudeState,
+    attr: &'a Attributor<'a>,
+    /// Titles to send, by session id.
+    titles: &'a BTreeMap<String, String>,
+    states: SessionStates,
+    now: DateTime<Utc>,
     scope: String,
     quarantine: Quarantine,
     report: SyncReport,
@@ -273,7 +332,7 @@ impl Uploader<'_> {
     /// rejections are collected in `rejected`; returns whether any part was
     /// accepted. A single entry refused with 413 is an error (never quarantined).
     fn send_split(&mut self, entries: &[UsageEntry], snap: Option<&UsageSnapshot>, rejected: &mut Vec<Rejected>) -> Result<bool, ApiError> {
-        let req = build_request(&self.device, entries, self.timeline, self.claude, snap);
+        let req = build_request_with(&self.device, entries, self.attr, self.titles, snap);
         let size = serde_json::to_vec(&req).map_or(usize::MAX, |v| v.len());
         if size > MAX_BATCH_BYTES && entries.len() > 1 {
             return self.split(entries, snap, rejected);
@@ -391,6 +450,222 @@ impl Uploader<'_> {
         write_json_atomic(&self.paths.quarantine(), &self.quarantine, None)?;
         Ok(())
     }
+
+    /// Records that the sessions of an accepted batch (minus any quarantined
+    /// meanwhile) were uploaded, with the titles attached to them.
+    fn note_accepted(&mut self, sent: &[(String, DateTime<Utc>)]) {
+        for (session_id, ts) in sent {
+            if self.quarantine.contains(&self.scope, session_id) {
+                continue;
+            }
+            self.states.note_uploaded(session_id, *ts, self.now);
+            if let Some(t) = self.titles.get(session_id) {
+                self.states.touch(session_id, self.now).sent_title = Some(t.clone());
+            }
+        }
+    }
+
+    fn title_sent(&mut self, s: &IngestSession) {
+        if let Some(t) = &s.title {
+            self.states.touch(&s.session_id, self.now).sent_title = Some(t.clone());
+            self.report.titles_sent += 1;
+        }
+    }
+
+    /// Sends title changes of sessions without new usage, as sessions with
+    /// no entries over the time range already uploaded (which leaves the
+    /// server's range and metadata as they are). A title the server refuses
+    /// is logged and not retried; a network or server error leaves the
+    /// titles for the next sync.
+    fn send_titles(&mut self, sessions: Vec<IngestSession>) -> Result<()> {
+        let request = |s: &[IngestSession], device: &Device| IngestRequest {
+            device: device.clone(),
+            accounts: vec![],
+            sessions: s.to_vec(),
+            entries: vec![],
+            limit_snapshot: None,
+        };
+        for chunk in sessions.chunks(MAX_BATCH_SESSIONS) {
+            match self.client.ingest(&request(chunk, &self.device)) {
+                Ok(_) => chunk.iter().for_each(|s| self.title_sent(s)),
+                Err(e @ ApiError::Unauthorized(_)) => return Err(self.fatal(e)),
+                Err(e) if deterministic(&e).is_some() => {
+                    for s in chunk {
+                        match self.client.ingest(&request(std::slice::from_ref(s), &self.device)) {
+                            Ok(_) => self.title_sent(s),
+                            Err(e @ ApiError::Unauthorized(_)) => return Err(self.fatal(e)),
+                            Err(e) if deterministic(&e).is_some() => {
+                                log(self.paths, &format!("title of session {} refused ({e}); not retried", s.session_id));
+                                if let Some(t) = &s.title {
+                                    self.states.touch(&s.session_id, self.now).sent_title = Some(t.clone());
+                                }
+                            }
+                            Err(e) => {
+                                log(self.paths, &format!("title update failed ({e}); retrying next sync"));
+                                return Ok(());
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    log(self.paths, &format!("title update failed ({e}); retrying next sync"));
+                    return Ok(());
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// New usage read from transcripts.
+struct Scanned {
+    files_read: usize,
+    /// Files with new uploadable usage. A file's entries may be empty when
+    /// they all duplicate entries queued from an earlier file (e.g. a copied
+    /// transcript): its offset then commits with the batch carrying those.
+    pending: Vec<(PathBuf, Position, Vec<UsageEntry>)>,
+}
+
+/// Reads new lines of `files` (from the start with `rescan`), recording
+/// titles of main transcripts in `states`. Offsets of files with nothing to
+/// upload are advanced in `offsets`.
+fn scan_files(
+    files: &[TranscriptFile],
+    offsets: &mut Offsets,
+    rescan: bool,
+    creds: &Credentials,
+    quarantined: impl Fn(&str) -> bool,
+    states: &mut SessionStates,
+    now: DateTime<Utc>,
+) -> Scanned {
+    let mut out = Scanned { files_read: 0, pending: Vec::new() };
+    let mut seen = HashSet::new();
+    for f in files {
+        let stored = if rescan { Position::default() } else { offsets.get(&f.path) };
+        let Ok(new) = scan::read_new_lines(&f.path, &stored) else { continue };
+        if new.lines.is_empty() {
+            if new.end != stored && !rescan {
+                offsets.set(&f.path, new.end); // rewritten, or an older offsets format
+            }
+            continue;
+        }
+        if !f.subagent {
+            for t in new.lines.iter().filter_map(|l| transcript::parse_title(l, &f.session_hint)) {
+                let id = match &t {
+                    TitleLine::Ai { session_id, .. } | TitleLine::Custom { session_id, .. } => session_id,
+                };
+                if !quarantined(id) {
+                    states.note_title(t, now);
+                }
+            }
+        }
+        out.files_read += 1;
+        let candidates: Vec<UsageEntry> = new
+            .lines
+            .iter()
+            .filter_map(|l| transcript::parse_line(l, f.subagent, &f.session_hint))
+            .filter(|e| e.ts >= creds.logged_in_at)
+            .filter(|e| !quarantined(&e.session_id))
+            .collect();
+        if candidates.is_empty() {
+            offsets.set(&f.path, new.end); // nothing to upload from these bytes
+            continue;
+        }
+        let entries = candidates.into_iter().filter(|e| seen.insert(e.message_id.clone())).collect();
+        out.pending.push((f.path.clone(), new.end, entries));
+    }
+    out
+}
+
+/// Per session, whether its usage is attributed from a CLIProxyAPI log, and
+/// the pool account of each entry so attributed (by message id). Session
+/// counts of pool accounts are kept in `states` for the fallback.
+fn pool_attribution<Tz: TimeZone>(
+    paths: &Paths,
+    mode: ProxyMode,
+    entries: &[&UsageEntry],
+    states: &mut SessionStates,
+    now: DateTime<Utc>,
+    tz: &Tz,
+) -> (HashMap<String, PoolHit>, BTreeMap<String, Result<SessionProxy, String>>) {
+    let mut cwd: HashMap<&str, &str> = HashMap::new();
+    for e in entries {
+        if let Some(c) = e.cwd.as_deref() {
+            cwd.entry(&e.session_id).or_insert(c);
+        }
+    }
+    let mut decisions: BTreeMap<String, Result<SessionProxy, String>> = BTreeMap::new();
+    for e in entries {
+        if !decisions.contains_key(&e.session_id) {
+            let d = proxy::session_proxy(paths, mode, &e.session_id, cwd.get(e.session_id.as_str()).copied(), now);
+            decisions.insert(e.session_id.clone(), d);
+        }
+    }
+    let mut windows: BTreeMap<PathBuf, LogWindow> = BTreeMap::new();
+    for e in entries {
+        if let Some(Ok(sp)) = decisions.get(&e.session_id) {
+            windows.entry(sp.dir.clone()).or_default().include(&e.session_id, e.ts);
+        }
+    }
+    let mut hits = HashMap::new();
+    if windows.is_empty() {
+        return (hits, decisions);
+    }
+    let mut resolver = PoolResolver::default();
+    resolver.load_logs(&windows, tz);
+    let mut unmatched = Vec::new();
+    for e in entries {
+        let Some(Ok(sp)) = decisions.get(&e.session_id) else { continue };
+        let found = resolver.matched_auth(&sp.dir, &e.session_id, &e.model, e.ts);
+        match found.and_then(|auth| resolver.account(&sp.dir, &auth).map(|a| (auth, a))) {
+            Some((auth, account)) => {
+                *states.touch(&e.session_id, now).pool_auths.entry(auth.clone()).or_default() += 1;
+                hits.insert(e.message_id.clone(), PoolHit { account, auth, how: PoolHow::Matched });
+            }
+            None => unmatched.push((*e, sp.dir.clone())),
+        }
+    }
+    for (e, dir) in unmatched {
+        let Some(auth) = states.get(&e.session_id).and_then(|s| s.top_pool_auth()).map(String::from) else { continue };
+        if let Some(account) = resolver.account(&dir, &auth) {
+            hits.insert(e.message_id.clone(), PoolHit { account, auth, how: PoolHow::SessionUsual });
+        }
+    }
+    (hits, decisions)
+}
+
+/// Titles to send, by session id: changed since last sent, not quarantined.
+fn pending_titles(states: &SessionStates, quarantine: &Quarantine, scope: &str) -> BTreeMap<String, String> {
+    states
+        .sessions
+        .iter()
+        .filter(|(id, _)| !quarantine.contains(scope, id))
+        .filter_map(|(id, s)| s.pending_title().map(|t| (id.clone(), t.to_string())))
+        .collect()
+}
+
+/// Title-only session updates: titles of sessions with no new usage in
+/// this run whose usage was uploaded before (a title alone never creates a
+/// session on the server).
+fn title_only(states: &SessionStates, titles: &BTreeMap<String, String>, with_usage: &HashSet<&str>) -> Vec<IngestSession> {
+    titles
+        .iter()
+        .filter(|(id, _)| !with_usage.contains(id.as_str()))
+        .filter_map(|(id, t)| {
+            let (started_at, ended_at) = states.get(id)?.uploaded_range()?;
+            Some(IngestSession { session_id: id.clone(), cwd: None, git_branch: None, started_at, ended_at, title: Some(t.clone()) })
+        })
+        .collect()
+}
+
+fn files_to_scan(paths: &Paths, creds: &Credentials, opts: &SyncOptions) -> Vec<TranscriptFile> {
+    match &opts.transcript {
+        Some(t) => scan::session_files(t),
+        None => {
+            let since = SystemTime::from(creds.logged_in_at).checked_sub(Duration::from_secs(3600));
+            scan::discover(&paths.projects_dir(), since)
+        }
+    }
 }
 
 pub fn run(paths: &Paths, creds: &Credentials, client: &ApiClient, opts: &SyncOptions, now: DateTime<Utc>) -> Result<SyncReport> {
@@ -408,47 +683,30 @@ pub fn run(paths: &Paths, creds: &Credentials, client: &ApiClient, opts: &SyncOp
     };
     let claude = checked.unwrap_or_default();
 
-    let files = match &opts.transcript {
-        Some(t) => scan::session_files(t),
-        None => {
-            let since = SystemTime::from(creds.logged_in_at).checked_sub(Duration::from_secs(3600));
-            scan::discover(&paths.projects_dir(), since)
-        }
-    };
-
+    let files = files_to_scan(paths, creds, opts);
     let scope = Quarantine::scope(creds);
     let quarantine = Quarantine::load(&paths.quarantine());
     let mut offsets = Offsets::load(&paths.offsets());
-    let mut seen = HashSet::new();
-    // Files with new uploadable usage. A file's entries may be empty when
-    // they all duplicate entries queued from an earlier file (e.g. a copied
-    // transcript): its offset then commits with the batch carrying those.
-    let mut pending: Vec<(PathBuf, Position, Vec<UsageEntry>)> = Vec::new();
-    for f in &files {
-        let stored = offsets.get(&f.path);
-        let Ok(new) = scan::read_new_lines(&f.path, &stored) else { continue };
-        if new.lines.is_empty() {
-            if new.end != stored {
-                offsets.set(&f.path, new.end); // rewritten, or an older offsets format
-            }
-            continue;
-        }
-        report.files_read += 1;
-        let candidates: Vec<UsageEntry> = new
-            .lines
-            .iter()
-            .filter_map(|l| transcript::parse_line(l, f.subagent, &f.session_hint))
-            .filter(|e| e.ts >= creds.logged_in_at)
-            .filter(|e| !quarantine.contains(&scope, &e.session_id))
-            .collect();
-        if candidates.is_empty() {
-            offsets.set(&f.path, new.end); // nothing to upload from these bytes
-            continue;
-        }
-        let entries = candidates.into_iter().filter(|e| seen.insert(e.message_id.clone())).collect();
-        pending.push((f.path.clone(), new.end, entries));
-    }
+    let mut states = SessionStates::load(&paths.sessions());
+    let scanned = scan_files(&files, &mut offsets, false, creds, |id| quarantine.contains(&scope, id), &mut states, now);
+    report.files_read = scanned.files_read;
+    let pending = scanned.pending;
+    // Titles first: the offsets below may move past the lines that held them.
+    states.save(&paths.sessions(), now)?;
     offsets.save(&paths.offsets())?;
+
+    let all: Vec<&UsageEntry> = pending.iter().flat_map(|(_, _, es)| es.iter()).collect();
+    let (pmode, _) = proxy::mode(paths, proxy::env_mode().as_deref());
+    let (pool, _) = pool_attribution(paths, pmode, &all, &mut states, now, &Local);
+    if !pool.is_empty() {
+        states.save(&paths.sessions(), now)?;
+    }
+    let attr = Attributor { timeline: &timeline, claude: &claude, pool };
+    let titles = pending_titles(&states, &quarantine, &scope);
+    let with_usage: HashSet<&str> = all.iter().map(|e| e.session_id.as_str()).collect();
+    let title_updates = title_only(&states, &titles, &with_usage);
+    drop(with_usage);
+    drop(all);
 
     let last_sent: Option<DateTime<Utc>> = read_json(&paths.last_snapshot());
     let current_uuid = claude.account.as_ref().map(|a| a.account_uuid.as_str());
@@ -459,7 +717,7 @@ pub fn run(paths: &Paths, creds: &Credentials, client: &ApiClient, opts: &SyncOp
         .filter(|s| last_sent.is_none_or(|l| s.fetched_at > l))
         .cloned();
 
-    if pending.iter().all(|(_, _, entries)| entries.is_empty()) && snapshot.is_none() {
+    if pending.iter().all(|(_, _, entries)| entries.is_empty()) && snapshot.is_none() && title_updates.is_empty() {
         // Nothing to upload, so nothing would notice a revoked token: check it
         // (one cheap request) so the gate blocks before the next prompt.
         if let Err(e @ ApiError::Unauthorized(_)) = client.me() {
@@ -476,7 +734,7 @@ pub fn run(paths: &Paths, creds: &Credentials, client: &ApiClient, opts: &SyncOp
     let mut batches = vec![first];
     for (path, end, entries) in pending {
         for e in entries {
-            let account = account_for(&timeline, &claude, e.ts).map_or(API_KEY_ACCOUNT, |a| a.account_uuid.as_str()).to_string();
+            let account = attr.account(&e).account_uuid;
             if !batches.last().unwrap().fits(&e.session_id, &account) {
                 batches.push(Batch::default());
             }
@@ -496,16 +754,21 @@ pub fn run(paths: &Paths, creds: &Credentials, client: &ApiClient, opts: &SyncOp
         creds,
         client,
         device: Device { hostname: hostname(), os: std::env::consts::OS.to_string() },
-        timeline: &timeline,
-        claude: &claude,
+        attr: &attr,
+        titles: &titles,
+        states,
+        now,
         scope,
         quarantine,
         report,
     };
     for (i, batch) in batches.into_iter().enumerate() {
         let snap = if i == 0 { snapshot.as_ref() } else { None };
+        let sent: Vec<(String, DateTime<Utc>)> = batch.entries.iter().map(|e| (e.session_id.clone(), e.ts)).collect();
         up.send_batch(batch.entries, snap)?;
         // Every entry of this batch is now accepted or quarantined.
+        up.note_accepted(&sent);
+        up.states.save(&paths.sessions(), now)?;
         for (path, end) in batch.completes {
             offsets.set(&path, end);
         }
@@ -514,5 +777,79 @@ pub fn run(paths: &Paths, creds: &Credentials, client: &ApiClient, opts: &SyncOp
             write_json_atomic(&paths.last_snapshot(), &s.fetched_at, None)?;
         }
     }
+    let title_updates: Vec<IngestSession> =
+        title_updates.into_iter().filter(|s| !up.quarantine.contains(&up.scope, &s.session_id)).collect();
+    if !title_updates.is_empty() {
+        up.send_titles(title_updates)?;
+        up.states.save(&paths.sessions(), now)?;
+    }
+    proxy::prune_markers(paths, Duration::from_secs(sessions::RETENTION.num_seconds().max(0) as u64));
     Ok(up.report)
 }
+
+/// One session in a dry run.
+#[derive(Debug, Default, PartialEq)]
+pub struct DryRunSession {
+    pub session_id: String,
+    pub title: Option<String>,
+    /// Whether the title would be sent.
+    pub title_pending: bool,
+    pub entries: usize,
+    /// Ok(why) when attributed from a CLIProxyAPI log, Err(why not) otherwise.
+    pub proxy: Option<Result<String, String>>,
+    /// Entries per (account label, how it was chosen).
+    pub accounts: BTreeMap<(String, String), usize>,
+}
+
+#[derive(Debug, Default)]
+pub struct DryRun {
+    pub mode: Option<(ProxyMode, proxy::ModeSource)>,
+    pub files_read: usize,
+    pub sessions: Vec<DryRunSession>,
+}
+
+/// What a sync would upload, with each entry's account and why, without
+/// uploading or changing any state. With `rescan`, transcripts are read from
+/// the start (usage since login) instead of from the stored offsets.
+pub fn dry_run(paths: &Paths, creds: &Credentials, opts: &SyncOptions, rescan: bool, now: DateTime<Utc>) -> DryRun {
+    let timeline = Timeline::load(&paths.timeline());
+    let claude = claude_json::read_checked(&paths.claude_json).unwrap_or_default();
+    let files = files_to_scan(paths, creds, opts);
+    let scope = Quarantine::scope(creds);
+    let quarantine = Quarantine::load(&paths.quarantine());
+    let mut offsets = Offsets::load(&paths.offsets());
+    let mut states = SessionStates::load(&paths.sessions());
+    if rescan {
+        // As if nothing had been sent: every title is shown as pending.
+        states.sessions.values_mut().for_each(|s| s.sent_title = None);
+    }
+    let scanned = scan_files(&files, &mut offsets, rescan, creds, |id| quarantine.contains(&scope, id), &mut states, now);
+    let all: Vec<&UsageEntry> = scanned.pending.iter().flat_map(|(_, _, es)| es.iter()).collect();
+    let mode = proxy::mode(paths, proxy::env_mode().as_deref());
+    let (pool, decisions) = pool_attribution(paths, mode.0, &all, &mut states, now, &Local);
+    let attr = Attributor { timeline: &timeline, claude: &claude, pool };
+    let titles = pending_titles(&states, &quarantine, &scope);
+
+    let mut by_session: BTreeMap<String, DryRunSession> = BTreeMap::new();
+    for e in &all {
+        let s = by_session.entry(e.session_id.clone()).or_insert_with(|| DryRunSession {
+            session_id: e.session_id.clone(),
+            proxy: decisions.get(&e.session_id).map(|d| d.as_ref().map(|p| p.why.clone()).map_err(Clone::clone)),
+            ..Default::default()
+        });
+        s.entries += 1;
+        let (account, how) = attr.explain(e);
+        *s.accounts.entry((account.email.unwrap_or(account.account_uuid), how.to_string())).or_default() += 1;
+    }
+    let with_usage: HashSet<&str> = all.iter().map(|e| e.session_id.as_str()).collect();
+    for u in title_only(&states, &titles, &with_usage) {
+        by_session.entry(u.session_id.clone()).or_insert_with(|| DryRunSession { session_id: u.session_id.clone(), ..Default::default() });
+    }
+    for s in by_session.values_mut() {
+        let st = states.get(&s.session_id);
+        s.title = st.and_then(|st| st.title()).map(String::from);
+        s.title_pending = titles.contains_key(&s.session_id) && (s.entries > 0 || st.and_then(|st| st.uploaded_range()).is_some());
+    }
+    DryRun { mode: Some(mode), files_read: scanned.files_read, sessions: by_session.into_values().collect() }
+}
+

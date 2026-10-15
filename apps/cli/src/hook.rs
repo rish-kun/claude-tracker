@@ -17,6 +17,7 @@ use serde_json::{Value, json};
 use crate::client::{ApiClient, ApiError};
 use crate::credentials::{self, AuthState, Credentials};
 use crate::paths::Paths;
+use crate::proxy;
 use crate::state::{LastSession, write_json_atomic};
 use crate::timeline;
 
@@ -277,6 +278,16 @@ pub fn check_with_deadline(check: &TokenChecker, creds: &Credentials, deadline: 
     }
 }
 
+/// Records whether the session runs through a CLIProxyAPI pool, from this
+/// hook's environment (Claude Code's) and Claude Code's settings. Never on
+/// the gate path (UserPromptSubmit/PreToolUse).
+fn record_proxy(paths: &Paths, input: &HookInput, point: proxy::HookPoint, now: DateTime<Utc>) {
+    let Some(session_id) = &input.session_id else { return };
+    let (mode, _) = proxy::mode(paths, proxy::env_mode().as_deref());
+    let env_url = std::env::var("ANTHROPIC_BASE_URL").ok();
+    proxy::record_session(paths, session_id, input.cwd.as_deref(), env_url.as_deref(), point, mode, now);
+}
+
 /// Runs a hook: records local state, decides, spawns any sync, and returns
 /// the JSON to print on stdout (possibly empty). On SessionStart with stored
 /// credentials, `check_token` asks the server whether the token still works
@@ -322,11 +333,17 @@ pub fn run(
                 let _ = write_json_atomic(&paths.last_session(), &last, None);
             }
             timeline::observe_current(paths, now);
+            record_proxy(paths, &input, proxy::HookPoint::SessionStart, now);
         }
-        HookEvent::UserPromptSubmit | HookEvent::Stop => {
+        HookEvent::UserPromptSubmit => {
             timeline::observe_current(paths, now);
         }
-        HookEvent::PreToolUse | HookEvent::SessionEnd => {}
+        HookEvent::Stop => {
+            timeline::observe_current(paths, now);
+            record_proxy(paths, &input, proxy::HookPoint::Later, now);
+        }
+        HookEvent::SessionEnd => record_proxy(paths, &input, proxy::HookPoint::Later, now),
+        HookEvent::PreToolUse => {}
     }
     let outcome = decide(event, &input, &gate, bin);
     if let Some(s) = &outcome.sync {
@@ -567,6 +584,22 @@ mod tests {
         let out = run(&paths, HookEvent::UserPromptSubmit, "garbage", Utc::now(), &fixed_bin(), &spawn, &valid()).unwrap();
         let v: Value = serde_json::from_str(&out).unwrap();
         assert_eq!(v["decision"], "block");
+    }
+
+    #[test]
+    fn proxy_detection_runs_only_outside_the_gate() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::under(dir.path());
+        let spawn = |_: &[String]| {};
+        let input = |id: &str| format!(r#"{{"session_id":"{id}","transcript_path":"/t/{id}.jsonl","cwd":"/p"}}"#);
+        for (ev, id) in [(HookEvent::UserPromptSubmit, "g1"), (HookEvent::PreToolUse, "g2")] {
+            run(&paths, ev, &input(id), Utc::now(), &fixed_bin(), &spawn, &valid()).unwrap();
+            assert!(proxy::session_marker(&paths, id).is_none(), "{ev:?} must not detect");
+        }
+        for (ev, id) in [(HookEvent::SessionStart, "s1"), (HookEvent::Stop, "s2"), (HookEvent::SessionEnd, "s3")] {
+            run(&paths, ev, &input(id), Utc::now(), &fixed_bin(), &spawn, &valid()).unwrap();
+            assert!(proxy::session_marker(&paths, id).is_some(), "{ev:?} records the session");
+        }
     }
 
     fn save_creds(paths: &Paths, invalid: bool) {

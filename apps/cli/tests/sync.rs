@@ -784,3 +784,184 @@ fn session_spanning_batches_is_quarantined_and_reported_once() {
     assert_eq!(Offsets::load(&fx.paths.offsets()).get(&bad).offset, fs::metadata(&bad).unwrap().len());
     mock.assert();
 }
+
+fn append(path: &std::path::Path, s: &str) {
+    let mut c = fs::read_to_string(path).unwrap();
+    c.push_str(s);
+    fs::write(path, c).unwrap();
+}
+
+fn sessions_of(body: &Value) -> Vec<Value> {
+    body["sessions"].as_array().unwrap().clone()
+}
+
+#[test]
+fn session_titles_are_sent_and_updated_without_new_usage() {
+    let fx = fixture();
+    let content = fs::read_to_string(&fx.transcript).unwrap();
+    fs::write(
+        &fx.transcript,
+        format!(
+            "{}\n{}\n{content}\n",
+            r#"{"type":"ai-title","aiTitle":"First idea","sessionId":"sess-1"}"#,
+            r#"{"type":"ai-title","aiTitle":"BITS Pilani SWD website IIS migration","sessionId":"sess-1"}"#
+        ),
+    )
+    .unwrap();
+    // Subagent transcripts carry no session title: ignored.
+    append(&subagent_path(&fx), "{\"type\":\"custom-title\",\"customTitle\":\"from a subagent\",\"sessionId\":\"sess-1\"}\n");
+    // A titled session with no usage is never created on the server by its title.
+    let other = fx.paths.projects_dir().join("-home-dev-other/sess-t.jsonl");
+    fs::create_dir_all(other.parent().unwrap()).unwrap();
+    fs::write(&other, "{\"type\":\"ai-title\",\"aiTitle\":\"Lonely\",\"sessionId\":\"sess-t\"}\n").unwrap();
+
+    let (server, mock, bodies) = recording_server(3);
+    let client = ApiClient::new(&server.url(), Some("cct_test"));
+    let report = sync::run(&fx.paths, &fx.creds, &client, &opts(), now()).unwrap();
+    assert_eq!((report.entries_sent, report.titles_sent), (3, 0));
+    {
+        let b = &bodies.lock().unwrap()[0];
+        let s = sessions_of(b);
+        assert_eq!(s.len(), 1);
+        assert_eq!(s[0]["title"], "BITS Pilani SWD website IIS migration", "the last AI title wins");
+    }
+
+    // A custom title appears later, in bytes after the usage: sent on its own.
+    append(&fx.transcript, "{\"type\":\"custom-title\",\"customTitle\":\"SOP Report\",\"sessionId\":\"sess-1\"}\n");
+    let report = sync::run(&fx.paths, &fx.creds, &client, &opts(), now()).unwrap();
+    assert_eq!((report.entries_sent, report.titles_sent), (0, 1));
+    {
+        let b = &bodies.lock().unwrap()[1];
+        assert!(b["entries"].as_array().unwrap().is_empty() && b["accounts"].as_array().unwrap().is_empty());
+        let s = sessions_of(b);
+        assert_eq!(s.len(), 1, "{b}");
+        assert_eq!(s[0]["session_id"], "sess-1");
+        assert_eq!(s[0]["title"], "SOP Report");
+        // The range already uploaded, so the server's range is unchanged.
+        assert_eq!(s[0]["started_at"], "2026-10-01T10:00:00Z");
+        assert_eq!(s[0]["ended_at"], "2026-10-01T10:05:00Z");
+        assert!(s[0].get("cwd").is_none());
+    }
+
+    // A later AI title does not beat the custom one: nothing to send.
+    append(&fx.transcript, "{\"type\":\"ai-title\",\"aiTitle\":\"Newer AI title\",\"sessionId\":\"sess-1\"}\n");
+    let report = sync::run(&fx.paths, &fx.creds, &client, &opts(), now()).unwrap();
+    assert_eq!((report.entries_sent, report.titles_sent), (0, 0));
+
+    // Renamed again: sent again.
+    append(&fx.transcript, "{\"type\":\"custom-title\",\"customTitle\":\"Renamed\",\"sessionId\":\"sess-1\"}\n");
+    let report = sync::run(&fx.paths, &fx.creds, &client, &opts(), now()).unwrap();
+    assert_eq!(report.titles_sent, 1);
+    let bodies = bodies.lock().unwrap();
+    assert_eq!(sessions_of(&bodies[2])[0]["title"], "Renamed");
+    assert!(bodies.iter().all(|b| !b.to_string().contains("Lonely") && !b.to_string().contains("from a subagent")));
+    mock.assert();
+}
+
+fn local(ts: &str) -> String {
+    chrono::DateTime::parse_from_rfc3339(ts).unwrap().with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M:%S").to_string()
+}
+
+fn line_model(session: &str, id: &str, ts: &str, model: &str) -> String {
+    format!(
+        r#"{{"type":"assistant","sessionId":"{session}","timestamp":"{ts}","message":{{"id":"{id}","model":"{model}","usage":{{"input_tokens":1,"output_tokens":1}}}}}}"#
+    )
+}
+
+/// A CLIProxyAPI home with two pool accounts and a log for session "sess-1".
+fn proxy_fixture(fx: &Fixture) {
+    use cctrack::proxy::{self, HookPoint, ProxyMode};
+    let dir = &fx.paths.cliproxy_dir;
+    fs::create_dir_all(dir.join("logs")).unwrap();
+    for (name, email, uuid) in [("pool-a.json", "a@pool.org", "pool-a-uuid"), ("pool-b.json", "b@pool.org", "pool-b-uuid")] {
+        fs::write(dir.join(name), format!(
+            r#"{{"type":"claude","email":"{email}","account_uuid":"{uuid}","organization_uuid":"org-{uuid}","organization_name":"Pool","access_token":"sk-ant-oat-SECRET","refresh_token":"sk-ant-ort-SECRET","id_token":"SECRET"}}"#
+        )).unwrap();
+    }
+    let sel = |ts: &str, req: &str, session: &str, auth: &str, model: &str| format!(
+        "[{}] [{req}] [info ] [selector.go:1068] session-affinity: cache hit | session={session} auth={auth} provider=mixed model={model}", local(ts)
+    );
+    let done = |ts: &str, req: &str| format!("[{}] [{req}] [info ] [gin_logger.go:108] 200 |  5s |  127.0.0.1 | POST \"/v1/messages?beta=true\"", local(ts));
+    let lines = [
+        sel("2026-10-01T09:59:58Z", "r1", "claude:s...", "pool-a.json", "claude-opus-5-5"),
+        done("2026-10-01T10:00:03Z", "r1"),
+        sel("2026-10-01T10:00:30Z", "r2", "claude:x...", "pool-a.json", "claude-opus-5-5"),
+        sel("2026-10-01T10:01:55Z", "r3", "claude:s...", "pool-b.json", "claude-opus-5-5"),
+        done("2026-10-01T10:02:10Z", "r3"),
+    ];
+    fs::write(dir.join("logs/main.log"), lines.join("\n") + "\n").unwrap();
+    // The SessionStart hook ran inside Claude Code started by the proxy wrapper.
+    proxy::record_session(&fx.paths, "sess-1", None, Some("http://127.0.0.1:8317"), HookPoint::SessionStart, ProxyMode::Auto, now());
+    // msg_4 complete, plus a haiku response that has no log line.
+    append(&fx.transcript, "\n");
+    append(&fx.transcript, &(line_model("sess-1", "msg_h", "2026-10-01T10:03:00Z", "claude-haiku-5-5") + "\n"));
+}
+
+#[test]
+fn proxied_usage_is_credited_to_the_pool_account_that_served_it() {
+    let fx = fixture();
+    proxy_fixture(&fx);
+
+    // Dry run first: same attribution, nothing uploaded or recorded.
+    let dry = sync::dry_run(&fx.paths, &fx.creds, &opts(), false, now());
+    assert_eq!(dry.sessions.len(), 1);
+    let s = &dry.sessions[0];
+    assert_eq!(s.entries, 4);
+    assert!(matches!(&s.proxy, Some(Ok(why)) if why.contains("Claude Code's environment")), "{:?}", s.proxy);
+    let count = |email: &str, how: &str| s.accounts.get(&(email.to_string(), how.to_string())).copied().unwrap_or(0);
+    assert_eq!(count("a@pool.org", "CLIProxyAPI log"), 1);
+    assert_eq!(count("b@pool.org", "CLIProxyAPI log"), 2);
+    assert_eq!(count("b@pool.org", "session's usual pool account"), 1);
+    assert!(!fx.paths.offsets().exists() && !fx.paths.sessions().exists(), "a dry run changes no state");
+
+    let (server, mock, bodies) = recording_server(1);
+    let client = ApiClient::new(&server.url(), Some("cct_test"));
+    let report = sync::run(&fx.paths, &fx.creds, &client, &opts(), now()).unwrap();
+    assert_eq!(report.entries_sent, 4);
+    let bodies = bodies.lock().unwrap();
+    let b = &bodies[0];
+    let account_of = |id: &str| {
+        b["entries"].as_array().unwrap().iter().find(|e| e["message_id"] == id).unwrap()["account_uuid"].as_str().unwrap().to_string()
+    };
+    assert_eq!(account_of("msg_1"), "pool-a-uuid", "the request in flight at 10:00:00");
+    assert_eq!(account_of("msg_3"), "pool-b-uuid", "subagent usage of the same session");
+    assert_eq!(account_of("msg_4"), "pool-b-uuid", "latest earlier request of the session");
+    assert_eq!(account_of("msg_h"), "pool-b-uuid", "no haiku line: the session's usual pool account");
+    let accounts = b["accounts"].as_array().unwrap();
+    let a = accounts.iter().find(|a| a["account_uuid"] == "pool-a-uuid").unwrap();
+    assert_eq!(a["email"], "a@pool.org");
+    assert_eq!(a["org_uuid"], "org-pool-a-uuid");
+    assert!(a.get("org_type").is_none() && a.get("rate_limit_tier").is_none(), "plans are set by an admin");
+    // The plan-limit snapshot stays with the oauthAccount.
+    assert_eq!(b["limit_snapshot"]["account_uuid"], "acc-1");
+    assert!(accounts.iter().any(|a| a["account_uuid"] == "acc-1"));
+    assert!(!b.to_string().contains("SECRET"), "auth tokens never leave the machine");
+    mock.assert();
+}
+
+#[test]
+fn proxy_mode_off_keeps_the_claude_account() {
+    let fx = fixture();
+    proxy_fixture(&fx);
+    cctrack::proxy::save_mode(&fx.paths, cctrack::proxy::ProxyMode::Off).unwrap();
+    let (server, mock, bodies) = recording_server(1);
+    let client = ApiClient::new(&server.url(), Some("cct_test"));
+    sync::run(&fx.paths, &fx.creds, &client, &opts(), now()).unwrap();
+    let bodies = bodies.lock().unwrap();
+    assert!(bodies[0]["entries"].as_array().unwrap().iter().all(|e| e["account_uuid"] == "acc-1"), "{}", bodies[0]);
+    mock.assert();
+}
+
+#[test]
+fn proxied_session_without_a_log_keeps_the_claude_account() {
+    let fx = fixture();
+    proxy_fixture(&fx);
+    fs::remove_file(fx.paths.cliproxy_dir.join("logs/main.log")).unwrap();
+    let dry = sync::dry_run(&fx.paths, &fx.creds, &opts(), false, now());
+    assert!(matches!(&dry.sessions[0].proxy, Some(Err(why)) if why.contains("no CLIProxyAPI log")), "{:?}", dry.sessions[0].proxy);
+    let (server, mock, bodies) = recording_server(1);
+    let client = ApiClient::new(&server.url(), Some("cct_test"));
+    sync::run(&fx.paths, &fx.creds, &client, &opts(), now()).unwrap();
+    assert!(bodies.lock().unwrap()[0]["entries"].as_array().unwrap().iter().all(|e| e["account_uuid"] == "acc-1"));
+    mock.assert();
+}
