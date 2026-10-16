@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 use std::fs::{self, File};
-use std::io::{self, Read, Seek, SeekFrom};
+use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -204,6 +204,38 @@ pub fn read_new_lines(path: &Path, stored: &Position) -> io::Result<NewLines> {
     };
     let fingerprint = Some(fingerprint_before(&mut f, end)?);
     Ok(NewLines { lines, start, end: Position { offset: end, dev, ino, fingerprint } })
+}
+
+/// Calls `f` with each line before `stored`'s offset (the bytes earlier
+/// syncs read), and returns true; returns false without reading when the
+/// file was rewritten since (see [`read_new_lines`]).
+pub fn for_each_line_before(path: &Path, stored: &Position, mut f: impl FnMut(&str)) -> io::Result<bool> {
+    let mut file = File::open(path)?;
+    let meta = file.metadata()?;
+    let (dev, ino) = identity(&meta);
+    let other_file = (stored.dev.is_some() && stored.dev != dev) || (stored.ino.is_some() && stored.ino != ino);
+    if stored.offset > meta.len() || other_file {
+        return Ok(false);
+    }
+    if let Some(fp) = &stored.fingerprint
+        && fingerprint_before(&mut file, stored.offset)? != *fp
+    {
+        return Ok(false);
+    }
+    file.seek(SeekFrom::Start(0))?;
+    let mut r = BufReader::new(file.take(stored.offset));
+    let mut buf = Vec::new();
+    loop {
+        buf.clear();
+        if r.read_until(b'\n', &mut buf)? == 0 {
+            return Ok(true);
+        }
+        let line = String::from_utf8_lossy(&buf);
+        let line = line.trim_end();
+        if !line.is_empty() {
+            f(line);
+        }
+    }
 }
 
 #[cfg(test)]

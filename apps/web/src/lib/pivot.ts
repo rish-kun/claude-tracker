@@ -62,3 +62,62 @@ export function markUnpriced(p: Pivot): Pivot {
   if (unpriced.size === 0) return p
   return { ...p, keys: p.keys.map((k) => (unpriced.has(k.key) ? { ...k, label: `${k.label} (unpriced)` } : k)) }
 }
+
+/** Key of the folded "Other" series. */
+export const OTHER_KEY = '__other'
+
+/** Most series a chart draws on their own; the rest fold into "Other". */
+export const MAX_SERIES = 5
+
+/**
+ * Keeps the series in `keep` (in that order) and folds every other series into one "Other"
+ * series, summing its cells and unpriced tokens. Without `keep`, the top 5 by total stay
+ * (keys are already sorted by total). With nothing to fold, no "Other" series is added.
+ */
+export function foldOther(p: Pivot, keep?: string[]): Pivot {
+  const kept = keep ? keep.filter((k) => p.keys.some((x) => x.key === k)) : p.keys.slice(0, MAX_SERIES).map((k) => k.key)
+  const keepSet = new Set(kept)
+  const folded = p.keys.filter((k) => !keepSet.has(k.key))
+  if (folded.length === 0) {
+    return { ...p, keys: kept.map((k) => p.keys.find((x) => x.key === k)!) }
+  }
+  const rows = p.rows.map((r) => {
+    const out: Record<string, string | number> = { date: r.date }
+    for (const k of kept) out[k] = r[k]
+    out[OTHER_KEY] = folded.reduce((n, k) => n + Number(r[k.key] ?? 0), 0)
+    return out
+  })
+  const unpriced: Pivot['unpriced'] = {}
+  for (const [date, day] of Object.entries(p.unpriced)) {
+    const out: Record<string, number> = {}
+    for (const [key, n] of Object.entries(day)) {
+      const k = keepSet.has(key) ? key : OTHER_KEY
+      out[k] = (out[k] ?? 0) + n
+    }
+    unpriced[date] = out
+  }
+  const keys = [...kept.map((k) => p.keys.find((x) => x.key === k)!), { key: OTHER_KEY, label: 'Other' }]
+  return { rows, keys, unpriced }
+}
+
+/** Per-date total across all series. */
+export function rowTotal(p: Pivot, row: Record<string, string | number>): number {
+  return p.keys.reduce((n, k) => n + Number(row[k.key] ?? 0), 0)
+}
+
+/** Screen-reader summary of a daily chart: "{title}, 1 Oct to 15 Oct. Highest day 9 Oct, $6.20." */
+export function chartSummary(title: string, p: Pivot, format: (n: number) => string, day: (ymd: string) => string): string {
+  if (p.rows.length === 0) return `${title}. No data.`
+  const first = String(p.rows[0].date)
+  const last = String(p.rows[p.rows.length - 1].date)
+  let best = p.rows[0]
+  for (const r of p.rows) if (rowTotal(p, r) > rowTotal(p, best)) best = r
+  const span = first === last ? day(first) : `${day(first)} to ${day(last)}`
+  const top = rowTotal(p, best)
+  return top > 0 ? `${title}, ${span}. Highest day ${day(String(best.date))}, ${format(top)}.` : `${title}, ${span}. Nothing in this range.`
+}
+
+/** Replaces series labels using `label(key)` where it returns a value (e.g. names instead of emails). */
+export function relabel(p: Pivot, label: (key: string) => string | undefined): Pivot {
+  return { ...p, keys: p.keys.map((k) => ({ ...k, label: label(k.key) ?? k.label })) }
+}

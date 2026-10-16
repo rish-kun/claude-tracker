@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { LimitSnapshot } from '../api/client'
-import { formatTimeTick, limitTimeline, type ResetMarker, selectResetMarkers } from './limits'
+import { filledCells, formatTimeTick, limitLevel, limitPressure, limitTimeline, type ResetMarker, selectResetMarkers, timeTicks, windowState } from './limits'
 
 const snap = (captured_at: string, extra: Partial<LimitSnapshot> = {}): LimitSnapshot => ({ account_id: 1, captured_at, ...extra })
 
@@ -81,5 +81,83 @@ describe('selectResetMarkers', () => {
   it('is applied by limitTimeline', () => {
     const snaps = [snap('2026-10-01T00:00:00Z', { five_hour_resets_at: '2026-10-01T05:00:00Z', seven_day_resets_at: '2026-10-03T00:00:00Z' }), snap('2026-10-06T00:00:00Z')]
     expect(limitTimeline(snaps).resets).toEqual([{ t: Date.parse('2026-10-03T00:00:00Z'), label: '7d reset' }])
+  })
+})
+
+describe('limit meter levels', () => {
+  it('bands by percentage', () => {
+    expect(limitLevel(0)).toBe('ok')
+    expect(limitLevel(69.9)).toBe('ok')
+    expect(limitLevel(70)).toBe('high')
+    expect(limitLevel(89)).toBe('high')
+    expect(limitLevel(90)).toBe('crit')
+    expect(limitLevel(120)).toBe('crit')
+  })
+  it('fills one cell per 5%, at least one for any usage, never more than 20', () => {
+    expect(filledCells(0)).toBe(0)
+    expect(filledCells(0.4)).toBe(1)
+    expect(filledCells(62)).toBe(12)
+    expect(filledCells(74)).toBe(15)
+    expect(filledCells(100)).toBe(20)
+    expect(filledCells(140)).toBe(20)
+  })
+  it('treats a window whose reset has passed as reset', () => {
+    const now = Date.parse('2026-10-15T12:00:00Z')
+    expect(windowState(undefined, undefined, now)).toEqual({ kind: 'none' })
+    expect(windowState(62.4, '2026-10-15T11:00:00Z', now)).toEqual({ kind: 'reset', was: 62, resetAt: '2026-10-15T11:00:00Z' })
+    expect(windowState(74, '2026-10-20T09:00:00Z', now)).toMatchObject({ kind: 'live', level: 'high', filled: 15 })
+  })
+  it('measures pressure as the fuller live window', () => {
+    const now = Date.parse('2026-10-15T12:00:00Z')
+    expect(limitPressure(undefined, now)).toBeUndefined()
+    expect(limitPressure(snap('2026-10-15T11:00:00Z'), now)).toBeUndefined()
+    expect(
+      limitPressure(snap('2026-10-15T11:00:00Z', { five_hour_pct: 95, five_hour_resets_at: '2026-10-15T11:30:00Z', seven_day_pct: 40 }), now),
+    ).toBe(40)
+  })
+})
+
+describe('timeTicks', () => {
+  const H = 3_600_000
+  const D = 24 * H
+
+  it('puts one tick per local midnight (or fewer) on spans over two days, never repeating a day', () => {
+    const from = new Date(2026, 9, 9, 14, 30).getTime()
+    const to = new Date(2026, 9, 15, 22, 0).getTime()
+    const ticks = timeTicks([from, to])
+    expect(ticks.length).toBeGreaterThan(1)
+    expect(ticks.length).toBeLessThanOrEqual(7)
+    for (const t of ticks) {
+      const d = new Date(t)
+      expect([d.getHours(), d.getMinutes()]).toEqual([0, 0])
+      expect(t).toBeGreaterThanOrEqual(from)
+      expect(t).toBeLessThanOrEqual(to)
+    }
+    expect(new Set(ticks.map((t) => new Date(t).toDateString())).size).toBe(ticks.length)
+    expect(new Date(ticks[0]).getDate()).toBe(10)
+  })
+
+  it('spaces days further apart on long spans', () => {
+    const from = new Date(2026, 6, 1).getTime()
+    const ticks = timeTicks([from, from + 90 * D])
+    expect(ticks.length).toBeLessThanOrEqual(7)
+    expect(ticks[1] - ticks[0]).toBeGreaterThanOrEqual(14 * D - 2 * H)
+  })
+
+  it('uses aligned whole hours on short spans', () => {
+    const from = new Date(2026, 9, 15, 8, 20).getTime()
+    const ticks = timeTicks([from, from + 30 * H])
+    expect(ticks.length).toBeLessThanOrEqual(7)
+    for (const t of ticks) {
+      const d = new Date(t)
+      expect(d.getMinutes()).toBe(0)
+      expect(d.getHours() % 6).toBe(0)
+      expect(t).toBeGreaterThanOrEqual(from)
+    }
+    expect(new Date(ticks[0]).getHours()).toBe(12)
+  })
+
+  it('handles an empty span', () => {
+    expect(timeTicks([5, 5])).toEqual([5])
   })
 })

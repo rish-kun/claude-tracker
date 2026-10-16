@@ -42,10 +42,10 @@ impl Timeline {
 
     /// Records `account` if it differs from the latest observation.
     pub fn observe(&mut self, now: DateTime<Utc>, account: Option<OAuthAccount>) -> bool {
-        if let Some(last) = self.observations.last() {
-            if uuid(&last.account) == uuid(&account) {
-                return false;
-            }
+        if let Some(last) = self.observations.last()
+            && uuid(&last.account) == uuid(&account)
+        {
+            return false;
         }
         self.observations.push(Observation { since: now, account });
         if self.observations.len() > MAX_OBSERVATIONS {

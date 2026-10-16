@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -230,11 +231,27 @@ type SessionRow struct {
 	UserName       string
 	AccountID      *int64
 	DeviceHostname *string
+	Cwd            *string
 	Project        *string
 	GitBranch      *string
+	Title          *string
 	Summary        *string
 	StartedAt      time.Time
 	EndedAt        time.Time
+}
+
+const sessionCols = `s.session_id, s.user_id, u.email, u.name, s.account_id, d.hostname, s.cwd, s.project,
+	s.git_branch, s.title, s.summary, s.started_at, s.ended_at`
+
+const sessionFrom = `FROM sessions s
+	JOIN users u ON u.id = s.user_id
+	LEFT JOIN devices d ON d.id = s.device_id`
+
+func scanSession(row pgx.CollectableRow) (SessionRow, error) {
+	var r SessionRow
+	err := row.Scan(&r.SessionID, &r.UserID, &r.UserEmail, &r.UserName, &r.AccountID, &r.DeviceHostname,
+		&r.Cwd, &r.Project, &r.GitBranch, &r.Title, &r.Summary, &r.StartedAt, &r.EndedAt)
+	return r, err
 }
 
 // ListSessions returns one page of a user's sessions (newest first) and the total count.
@@ -243,23 +260,59 @@ func (s *Store) ListSessions(ctx context.Context, userID int64, limit, offset in
 	if err := s.pool.QueryRow(ctx, `SELECT count(*) FROM sessions WHERE user_id = $1`, userID).Scan(&total); err != nil {
 		return nil, 0, err
 	}
-	rows, err := s.pool.Query(ctx, `
-		SELECT s.session_id, s.user_id, u.email, u.name, s.account_id, d.hostname, s.project, s.git_branch,
-		       s.summary, s.started_at, s.ended_at
-		FROM sessions s
-		JOIN users u ON u.id = s.user_id
-		LEFT JOIN devices d ON d.id = s.device_id
+	rows, err := s.pool.Query(ctx, `SELECT `+sessionCols+` `+sessionFrom+`
 		WHERE s.user_id = $1
 		ORDER BY s.started_at DESC, s.session_id
 		LIMIT $2 OFFSET $3`, userID, limit, offset)
 	if err != nil {
 		return nil, 0, err
 	}
-	list, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (SessionRow, error) {
-		var r SessionRow
-		err := row.Scan(&r.SessionID, &r.UserID, &r.UserEmail, &r.UserName, &r.AccountID, &r.DeviceHostname,
-			&r.Project, &r.GitBranch, &r.Summary, &r.StartedAt, &r.EndedAt)
+	list, err := pgx.CollectRows(rows, scanSession)
+	return list, total, err
+}
+
+// SessionByID returns one session whoever owns it; callers enforce access.
+func (s *Store) SessionByID(ctx context.Context, sessionID string) (SessionRow, error) {
+	rows, err := s.pool.Query(ctx, `SELECT `+sessionCols+` `+sessionFrom+` WHERE s.session_id = $1`, sessionID)
+	if err != nil {
+		return SessionRow{}, err
+	}
+	r, err := pgx.CollectExactlyOneRow(rows, scanSession)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return SessionRow{}, ErrNotFound
+	}
+	return r, err
+}
+
+// SessionAggRow is an AggRow for one session, further split by whether the
+// entries came from a subagent, with the entry count and the largest prompt
+// (input + cache tokens) of any one entry in the group.
+type SessionAggRow struct {
+	AggRow
+	IsSubagent bool
+	Calls      int64
+	PeakPrompt int64
+}
+
+// SessionAggregate sums one session's tokens grouped by subagent flag, model,
+// speed and the long-context flag (the last three needed for pricing).
+func (s *Store) SessionAggregate(ctx context.Context, sessionID string) ([]SessionAggRow, error) {
+	rows, err := s.pool.Query(ctx, fmt.Sprintf(`
+		SELECT is_subagent, model, speed,
+		       (input + cache_write_5m + cache_write_1h + cache_read) > %d AS long_ctx,
+		       count(*)::bigint, max(input + cache_write_5m + cache_write_1h + cache_read)::bigint,
+		       sum(input)::bigint, sum(output)::bigint, sum(cache_write_5m)::bigint,
+		       sum(cache_write_1h)::bigint, sum(cache_read)::bigint
+		FROM usage_entries
+		WHERE session_id = $1
+		GROUP BY 1, 2, 3, 4`, pricing.LongContextThreshold), sessionID)
+	if err != nil {
+		return nil, err
+	}
+	return pgx.CollectRows(rows, func(row pgx.CollectableRow) (SessionAggRow, error) {
+		r := SessionAggRow{AggRow: AggRow{SessionID: sessionID}}
+		err := row.Scan(&r.IsSubagent, &r.Model, &r.Speed, &r.LongCtx, &r.Calls, &r.PeakPrompt,
+			&r.Counts.Input, &r.Counts.Output, &r.Counts.CacheWrite5m, &r.Counts.CacheWrite1h, &r.Counts.CacheRead)
 		return r, err
 	})
-	return list, total, err
 }

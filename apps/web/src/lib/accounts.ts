@@ -1,6 +1,7 @@
-import type { Account, AccountRef, ByLogin, Plan, Schemas, Totals } from '../api/client'
+import type { Account, AccountRef, ByLogin, LimitSnapshot, Plan, Schemas, Totals } from '../api/client'
 import { type Draft, draftConflict, draftDirty, type DraftOps, startDraft, syncDraft } from './drafts'
 import { PLANS } from './format'
+import { limitPressure } from './limits'
 
 type AccountUsage = Schemas['AccountUsage']
 
@@ -103,4 +104,29 @@ export function syncAccountDraft(s: AccountDraft, server: AccountFields): Accoun
 /** The server label/plan changed underneath an edited draft. */
 export function accountConflict(s: AccountDraft, server: AccountFields): boolean {
   return draftConflict(accountOps, s, server)
+}
+
+/** A plan guessed from Claude's reported rate-limit tier, offered to admins as a suggestion. */
+export function suggestPlan(tier?: string): Plan | undefined {
+  if (!tier) return undefined
+  if (/max_20x|20x/i.test(tier)) return 'max_20x'
+  if (/max_5x|5x/i.test(tier)) return 'max_5x'
+  if (/pro/i.test(tier)) return 'pro'
+  return undefined
+}
+
+/**
+ * Accounts ordered by current limit pressure (fullest window first; a window whose reset
+ * has passed counts as 0), accounts without readings last, ties by API-equivalent cost.
+ */
+export function sortByPressure<T extends { limits: LimitSnapshot[]; totals: Totals }>(accounts: T[], now: number): T[] {
+  const pressure = (a: T) => limitPressure(a.limits[a.limits.length - 1], now)
+  return [...accounts].sort((a, b) => {
+    const pa = pressure(a)
+    const pb = pressure(b)
+    if (pa === undefined && pb !== undefined) return 1
+    if (pb === undefined && pa !== undefined) return -1
+    if (pa !== undefined && pb !== undefined && pa !== pb) return pb - pa
+    return b.totals.cost_usd - a.totals.cost_usd
+  })
 }

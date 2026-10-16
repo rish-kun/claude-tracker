@@ -88,20 +88,34 @@ func (s *Server) sessionPage(ctx context.Context, rows []store.SessionRow, total
 		g.Add(r.SessionID, table, r)
 	}
 	for _, r := range rows {
-		item := api.Session{
-			SessionId:      r.SessionID,
-			User:           api.UserRef{Id: r.UserID, Email: r.UserEmail, Name: r.UserName},
-			DeviceHostname: r.DeviceHostname, Project: r.Project, GitBranch: r.GitBranch, Summary: r.Summary,
-			StartedAt: r.StartedAt, EndedAt: r.EndedAt,
-			Totals: g.Get(r.SessionID).Totals(),
-		}
-		if r.AccountID != nil {
-			if a, ok := accounts[*r.AccountID]; ok {
-				ref := accountRef(a)
-				item.Account = &ref
-			}
-		}
-		page.Items = append(page.Items, item)
+		page.Items = append(page.Items, sessionToAPI(r, accounts, g.Get(r.SessionID).Totals()))
 	}
 	return page, nil
+}
+
+// sessionToAPI converts a session row; accounts must hold its account (if
+// any) for the account ref to be filled in. Empty strings are omitted.
+func sessionToAPI(r store.SessionRow, accounts map[int64]store.Account, totals api.Totals) api.Session {
+	item := api.Session{
+		SessionId:      r.SessionID,
+		User:           api.UserRef{Id: r.UserID, Email: r.UserEmail, Name: r.UserName},
+		DeviceHostname: r.DeviceHostname, Cwd: nonEmpty(r.Cwd), Project: r.Project, GitBranch: r.GitBranch,
+		Title: nonEmpty(r.Title), Summary: r.Summary,
+		StartedAt: r.StartedAt, EndedAt: r.EndedAt,
+		Totals: totals,
+	}
+	if r.AccountID != nil {
+		if a, ok := accounts[*r.AccountID]; ok {
+			ref := accountRef(a)
+			item.Account = &ref
+		}
+	}
+	return item
+}
+
+func nonEmpty(p *string) *string {
+	if p == nil || *p == "" {
+		return nil
+	}
+	return p
 }

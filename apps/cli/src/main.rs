@@ -29,6 +29,21 @@ enum Cmd {
         /// Log errors to the state dir instead of stderr (used by hooks).
         #[arg(long)]
         quiet: bool,
+        /// Print what would be uploaded per session (account, how it was chosen,
+        /// title) without uploading or changing any state.
+        #[arg(long, conflicts_with = "quiet")]
+        dry_run: bool,
+        /// With --dry-run: read transcripts from the start (usage since login),
+        /// not just what is new since the last sync.
+        #[arg(long, requires = "dry_run")]
+        rescan: bool,
+    },
+    /// Show or set how usage through a local CLIProxyAPI pool is credited:
+    /// auto (detect per session, the default), on (every session), off (never).
+    /// CCTRACK_PROXY_MODE overrides the saved mode.
+    Proxy {
+        #[arg(value_enum, default_value = "status")]
+        action: ProxyAction,
     },
     /// Sign in with Google. Required before Claude Code will start work.
     Login {
@@ -70,7 +85,9 @@ fn run(cli: Cli) -> Result<ExitCode> {
     let paths = Paths::from_env()?;
     match cli.cmd {
         Cmd::Status { json } => status(&paths, json),
-        Cmd::Sync { transcript, quiet } => sync_cmd(&paths, transcript, quiet),
+        Cmd::Sync { transcript, dry_run: true, rescan, .. } => dry_run(&paths, transcript, rescan),
+        Cmd::Sync { transcript, quiet, .. } => sync_cmd(&paths, transcript, quiet),
+        Cmd::Proxy { action } => proxy_cmd(&paths, action),
         Cmd::Login { server, paste } => {
             let server = server
                 .or_else(|| match credentials::load(&paths) {
@@ -194,6 +211,12 @@ fn sync_cmd(paths: &Paths, transcript: Option<std::path::PathBuf>, quiet: bool) 
                 println!("cctrack: another sync is running");
             } else {
                 println!("cctrack: sent {} entries ({} new, {} already recorded)", r.entries_sent, r.accepted, r.duplicates);
+                if r.titles_sent > 0 {
+                    println!("cctrack: updated {} session titles", r.titles_sent);
+                }
+            }
+            for msg in &r.title_errors {
+                eprintln!("cctrack: {msg}");
             }
             for id in &r.quarantined {
                 eprintln!("cctrack: the server refused session {id}; its usage was dropped and it will not be retried (see {})", paths.sync_log().display());
@@ -209,6 +232,81 @@ fn sync_cmd(paths: &Paths, transcript: Option<std::path::PathBuf>, quiet: bool) 
     }
 }
 
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum ProxyAction {
+    /// Detect per session whether it runs through a CLIProxyAPI pool.
+    Auto,
+    /// Treat every session as running through the pool.
+    On,
+    /// Never credit pool accounts (the behaviour before 0.2.0).
+    Off,
+    /// Show the mode, what is detected and why, and the pool accounts.
+    Status,
+}
+
+fn proxy_cmd(paths: &Paths, action: ProxyAction) -> Result<ExitCode> {
+    use cctrack::proxy::{self, ProxyMode};
+    let mode = match action {
+        ProxyAction::Auto => ProxyMode::Auto,
+        ProxyAction::On => ProxyMode::On,
+        ProxyAction::Off => ProxyMode::Off,
+        ProxyAction::Status => {
+            let env_url = std::env::var("ANTHROPIC_BASE_URL").ok();
+            let cwd = std::env::current_dir().ok();
+            let out = proxy::status_report(paths, proxy::env_mode().as_deref(), env_url.as_deref(), cwd.as_deref(), chrono::Utc::now());
+            println!("{out}");
+            return Ok(ExitCode::SUCCESS);
+        }
+    };
+    proxy::save_mode(paths, mode)?;
+    println!("cctrack: proxy mode set to {}", mode.as_str());
+    if let Some(v) = proxy::env_mode().filter(|v| ProxyMode::parse(v).is_some_and(|m| m != mode)) {
+        eprintln!("cctrack: note: {}={v} in this environment overrides the saved mode", proxy::MODE_ENV);
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+fn dry_run(paths: &Paths, transcript: Option<std::path::PathBuf>, rescan: bool) -> Result<ExitCode> {
+    let AuthState::LoggedIn(creds) = credentials::load(paths) else {
+        anyhow::bail!("not logged in — run `cctrack login`");
+    };
+    let opts = cctrack::sync::SyncOptions { transcript, wait_for_lock: std::time::Duration::ZERO };
+    let r = cctrack::sync::dry_run(paths, &creds, &opts, rescan, chrono::Utc::now())?;
+    if let Some((mode, source)) = r.mode {
+        let source = match source {
+            cctrack::proxy::ModeSource::Env => "from CCTRACK_PROXY_MODE",
+            cctrack::proxy::ModeSource::Saved => "saved",
+            cctrack::proxy::ModeSource::Default => "default",
+        };
+        println!("cctrack sync --dry-run: proxy mode {} ({source}); {} transcript files with new lines; nothing uploaded", mode.as_str(), r.files_read);
+    }
+    for w in &r.warnings {
+        println!("warning: {w}");
+    }
+    if r.sessions.is_empty() {
+        println!("nothing to upload");
+    }
+    for s in &r.sessions {
+        let title = match (&s.title, s.title_pending) {
+            (Some(t), true) => format!(" title {t:?} (would be sent)"),
+            (Some(t), false) => format!(" title {t:?}"),
+            (None, _) => String::new(),
+        };
+        println!("session {}: {} entries{title}", s.session_id, s.entries);
+        match &s.proxy {
+            Some(Ok(why)) => println!("  proxied: {why}"),
+            Some(Err(why)) => println!("  not proxied: {why}"),
+            None => {}
+        }
+        if let Some(note) = &s.looks_proxied {
+            println!("  note: {note}");
+        }
+        for ((account, how), n) in &s.accounts {
+            println!("  {n} entries -> {account} ({how})");
+        }
+    }
+    Ok(ExitCode::SUCCESS)
+}
 
 fn upload(paths: &Paths, summary: &str, session: Option<String>) -> Result<ExitCode> {
     use cctrack::client::{ApiClient, ApiError};
@@ -229,6 +327,7 @@ fn upload(paths: &Paths, summary: &str, session: Option<String>) -> Result<ExitC
         .filter(|l| l.session_id == session_id)
         .and_then(|l| l.transcript_path)
         .map(std::path::PathBuf::from)
+        .filter(|p| p.is_file())
         .or_else(|| cctrack::scan::find_transcript(&paths.projects_dir(), &session_id));
 
     let client = ApiClient::new(&creds.server, Some(&creds.token));

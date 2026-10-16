@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { AccountRef, ByLogin, Totals } from '../api/client'
-import { accountColumns, accountConflict, accountDirty, accountDraft, accountName, groupSpan, planGroups, planSubtotal, sumTotals, syncAccountDraft } from './accounts'
+import { accountColumns, accountConflict, accountDirty, accountDraft, accountName, groupSpan, planGroups, planSubtotal, sortByPressure, suggestPlan, sumTotals, syncAccountDraft } from './accounts'
 
 const zero: Totals = {
   input: 0,
@@ -135,5 +135,37 @@ describe('account row drafts', () => {
     expect(s.base).toEqual(newer)
     expect(accountConflict(s, newer)).toBe(false)
     expect(accountDirty(s)).toBe(false)
+  })
+})
+
+describe('suggestPlan', () => {
+  it('maps reported tiers to plans', () => {
+    expect(suggestPlan('default_claude_max_20x')).toBe('max_20x')
+    expect(suggestPlan('default_claude_max_5x')).toBe('max_5x')
+    expect(suggestPlan('claude_pro')).toBe('pro')
+    expect(suggestPlan('enterprise_tier')).toBeUndefined()
+    expect(suggestPlan(undefined)).toBeUndefined()
+  })
+})
+
+describe('sortByPressure', () => {
+  it('orders by the fuller live window, readings first, ties by cost', () => {
+    const now = Date.parse('2026-10-15T12:00:00Z')
+    const a = (id: number, cost: number, limits: { five?: number; seven?: number; fiveReset?: string }[]) => ({
+      id,
+      totals: t({ cost_usd: cost }),
+      limits: limits.map((l) => ({
+        account_id: id,
+        captured_at: '2026-10-15T11:00:00Z',
+        five_hour_pct: l.five,
+        five_hour_resets_at: l.fiveReset,
+        seven_day_pct: l.seven,
+      })),
+    })
+    const sorted = sortByPressure(
+      [a(1, 50, []), a(2, 1, [{ five: 30, seven: 60 }]), a(3, 9, [{ five: 99, fiveReset: '2026-10-15T11:30:00Z', seven: 20 }]), a(4, 5, [{ five: 80 }]), a(5, 90, [])],
+      now,
+    )
+    expect(sorted.map((x) => x.id)).toEqual([4, 2, 3, 5, 1])
   })
 })

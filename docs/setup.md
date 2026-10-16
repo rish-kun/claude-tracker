@@ -73,7 +73,11 @@ If you downloaded it with a browser, macOS quarantines the file; clear that with
 `xattr -d com.apple.quarantine ~/.local/bin/cctrack`. Each asset has a `.sha256` file next to it.
 
 A maintainer publishes a release by pushing a tag such as `cli-v0.1.0` (the
-`release` workflow builds every target). To build from source instead, run
+`release` workflow builds every target).
+Every release also carries `setup.md`, step-by-step instructions to give a Claude Code agent
+so it can install the CLI, sign in and add the plugin. Its server URL comes from the repo
+variable `CCTRACK_SERVER_URL` (default `https://claude-tracker-inky.vercel.app`); the template is
+`release/setup.md`. To build from source instead, run
 `cargo install --path apps/cli` (needs Rust 1.89+).
 On a machine without a browser, sign in the first time with
 `cctrack login --server https://cctrack.example.com --paste` (afterwards `cctrack login --paste`
@@ -82,6 +86,37 @@ is enough). Check with `cctrack status`.
 The plugin runs `cctrack` only from `~/.cargo/bin`, `/opt/homebrew/bin`, `/usr/local/bin` or
 `~/.local/bin` (never from an arbitrary `PATH` entry). If you installed it elsewhere, set
 `CCTRACK_BIN` to its full path in the environment Claude Code starts from.
+
+If you run Claude Code through a local [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI)
+pool (`ANTHROPIC_BASE_URL` pointing at `127.0.0.1`/`localhost`, or at the port in the proxy's
+`config.yaml` on this machine's hostname or a private/LAN IP address), usage is
+credited to the pool account that served each request, read from the proxy's log
+(`~/.cli-proxy-api/logs/main.log`; set `CCTRACK_CLIPROXY_DIR` if it lives elsewhere), not to the
+account you are signed in with. Only each pool account's id, email and organization are read from
+its auth file (and kept in cctrack's state dir, so usage stays attributable if the file is later
+deleted or renamed); its tokens are never kept, printed or uploaded. Set each pool account's plan
+in the dashboard's Settings. `cctrack proxy status` shows what is detected and the pool accounts;
+`cctrack proxy auto|on|off` sets the mode, and `CCTRACK_PROXY_MODE` overrides it:
+
+- `auto` (the default) decides per session from Claude Code's environment (recorded by the plugin's
+  hooks) and settings files. An `ANTHROPIC_BASE_URL` set to `""` in a higher-priority settings file
+  means not proxied, as in Claude Code. A session with no hook record and no `ANTHROPIC_BASE_URL`
+  anywhere (e.g. started before the plugin was installed) is judged from the proxy log: it counts as
+  proxied when at least 80% of at least 3 of its responses arrived while a request of a session with
+  the same first character and model was running. That decision is kept for the session. The log
+  only names a session's first character, so a direct session judged this way can be mistaken for a
+  proxied one if it ran alongside a proxied session whose id starts with the same character and used
+  the same model; sessions with a hook record are not affected.
+- `on` credits **every** session from the proxy log, even sessions a hook saw as not proxied (for
+  example a plain `claude` started without the proxy). Use it only if all your Claude Code usage goes
+  through the pool.
+- `off` never credits pool accounts.
+
+`cctrack sync --dry-run` prints each session's attribution without uploading, including sessions
+that look proxied but are credited to your own account. The proxy log is in the proxy host's local
+time; if sessions a hook recorded as proxied match nothing with this machine's offset, cctrack finds
+the offset that fits from at least two such sessions (shown as a warning by `proxy status` and
+`--dry-run`).
 
 ## 5. Enable the Claude Code plugin (each developer)
 
@@ -140,7 +175,8 @@ relies on TypeScript 5's compiler API.
 
 Per assistant response: session id, message id, model, timestamp, token counts
 (input, output, cache writes, cache reads), speed, and whether it came from a subagent;
-per session: working directory, git branch, device hostname, and an optional 1–2 line
-summary written by a Haiku subagent. Prompts, responses and file contents never leave
-the machine. Plan-limit percentages come from Claude Code's cached utilisation in
+per session: working directory, git branch, device hostname, the session title Claude Code
+generated or the one you set with `/rename` (a short name, not the prompts themselves), and an
+optional 1–2 line summary written by a Haiku subagent. Prompts, responses and file
+contents never leave the machine. Plan-limit percentages come from Claude Code's cached utilisation in
 `~/.claude.json`, which is undocumented and may be missing.

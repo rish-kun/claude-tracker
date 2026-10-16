@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { type Account, api, type ModelPrice, unwrap, type Plan, type PriceRates } from './client'
+import { type Account, api, ApiError, type ModelPrice, unwrap, type Plan, type PriceRates } from './client'
 import { type Range, rangeAdvanced, rangeKey, rangeQuery } from '../lib/range'
 
 export const PAGE_SIZE = 20
@@ -49,6 +49,19 @@ export function useMySessions(page: number) {
   })
 }
 
+/**
+ * One session with its usage broken down (main conversation vs subagents, by model).
+ * A 404 means it isn't visible to this user (or hasn't synced); that's final, so it isn't retried.
+ */
+export function useSession(sessionId: string) {
+  return useQuery({
+    queryKey: ['session', sessionId],
+    queryFn: () => unwrap(api.GET('/sessions/{sessionId}', { params: { path: { sessionId } } })),
+    refetchInterval: USAGE_REFETCH_MS,
+    retry: (count, err) => !(err instanceof ApiError && (err.status === 404 || err.status === 401)) && count < 3,
+  })
+}
+
 export function useByLogin(r: Range) {
   return useQuery({
     ...rangeQueryOptions(r),
@@ -77,8 +90,9 @@ export function useUserSessions(userId: number, page: number) {
   })
 }
 
-export function useAccounts() {
-  return useQuery({ queryKey: ['admin', 'accounts'], queryFn: () => unwrap(api.GET('/admin/accounts')) })
+/** `enabled` lets the app shell ask only for admins (for the "plan not set" nav dot). */
+export function useAccounts(enabled = true) {
+  return useQuery({ queryKey: ['admin', 'accounts'], queryFn: () => unwrap(api.GET('/admin/accounts')), enabled })
 }
 
 export function useUsers() {

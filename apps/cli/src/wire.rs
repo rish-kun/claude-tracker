@@ -35,6 +35,9 @@ pub struct IngestSession {
     pub git_branch: Option<String>,
     pub started_at: DateTime<Utc>,
     pub ended_at: DateTime<Utc>,
+    /// The session's latest title (custom beats AI); never prompt text.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
 }
 
 #[derive(Serialize, Clone, Debug, PartialEq)]

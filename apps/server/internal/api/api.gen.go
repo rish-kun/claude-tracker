@@ -222,6 +222,9 @@ type IngestSession struct {
 	GitBranch *string   `json:"git_branch,omitempty"`
 	SessionId string    `json:"session_id"`
 	StartedAt time.Time `json:"started_at"`
+
+	// Title Claude Code's short session title. Trimmed and truncated to 200 characters. A non-empty title replaces the stored one; an absent or empty title keeps it.
+	Title *string `json:"title,omitempty"`
 }
 
 // LimitSnapshot defines model for LimitSnapshot.
@@ -304,6 +307,7 @@ type SeriesPoint struct {
 // Session defines model for Session.
 type Session struct {
 	Account        *AccountRef `json:"account,omitempty"`
+	Cwd            *string     `json:"cwd,omitempty"`
 	DeviceHostname *string     `json:"device_hostname,omitempty"`
 	EndedAt        time.Time   `json:"ended_at"`
 	GitBranch      *string     `json:"git_branch,omitempty"`
@@ -311,14 +315,46 @@ type Session struct {
 	SessionId      string      `json:"session_id"`
 	StartedAt      time.Time   `json:"started_at"`
 	Summary        *string     `json:"summary,omitempty"`
-	Totals         Totals      `json:"totals"`
-	User           UserRef     `json:"user"`
+
+	// Title Claude Code's session title, when known
+	Title  *string `json:"title,omitempty"`
+	Totals Totals  `json:"totals"`
+	User   UserRef `json:"user"`
+}
+
+// SessionDetail defines model for SessionDetail.
+type SessionDetail struct {
+	// ByModel Sorted by cost descending, then model.
+	ByModel []SessionModelUsage `json:"by_model"`
+
+	// Calls Number of usage entries (API responses)
+	Calls int64       `json:"calls"`
+	Main  SessionPart `json:"main"`
+
+	// PeakContextTokens Largest prompt of any one call (input + cache_read + cache_write_5m + cache_write_1h).
+	PeakContextTokens int64       `json:"peak_context_tokens"`
+	Session           Session     `json:"session"`
+	Subagents         SessionPart `json:"subagents"`
+}
+
+// SessionModelUsage defines model for SessionModelUsage.
+type SessionModelUsage struct {
+	Calls  int64  `json:"calls"`
+	Model  string `json:"model"`
+	Totals Totals `json:"totals"`
 }
 
 // SessionPage defines model for SessionPage.
 type SessionPage struct {
 	Items []Session `json:"items"`
 	Total int       `json:"total"`
+}
+
+// SessionPart defines model for SessionPart.
+type SessionPart struct {
+	// Calls Number of usage entries (API responses)
+	Calls  int64  `json:"calls"`
+	Totals Totals `json:"totals"`
 }
 
 // SummaryRequest defines model for SummaryRequest.
@@ -524,6 +560,9 @@ type ServerInterface interface {
 
 	// (GET /me/usage)
 	GetMyUsage(w http.ResponseWriter, r *http.Request, params GetMyUsageParams)
+
+	// (GET /sessions/{sessionId})
+	GetSession(w http.ResponseWriter, r *http.Request, sessionId string)
 
 	// (POST /sessions/{sessionId}/summary)
 	SetSessionSummary(w http.ResponseWriter, r *http.Request, sessionId string)
@@ -1195,6 +1234,32 @@ func (siw *ServerInterfaceWrapper) GetMyUsage(w http.ResponseWriter, r *http.Req
 	handler.ServeHTTP(w, r)
 }
 
+// GetSession operation middleware
+func (siw *ServerInterfaceWrapper) GetSession(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "sessionId" -------------
+	var sessionId string
+
+	err = runtime.BindStyledParameterWithOptions("simple", "sessionId", r.PathValue("sessionId"), &sessionId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "sessionId", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.GetSession(w, r, sessionId)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
 // SetSessionSummary operation middleware
 func (siw *ServerInterfaceWrapper) SetSessionSummary(w http.ResponseWriter, r *http.Request) {
 
@@ -1350,6 +1415,7 @@ func HandlerWithOptions(si ServerInterface, options StdHTTPServerOptions) http.H
 	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/auth/logout", wrapper.WebLogout)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/me", wrapper.GetMe)
 	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/ingest", wrapper.Ingest)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/sessions/{sessionId}", wrapper.GetSession)
 	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/sessions/{sessionId}/summary", wrapper.SetSessionSummary)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/me/usage", wrapper.GetMyUsage)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/me/sessions", wrapper.ListMySessions)

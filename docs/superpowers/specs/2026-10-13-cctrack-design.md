@@ -81,7 +81,7 @@ Code generation: Go server interfaces/types via **oapi-codegen v2** (std `net/ht
 | `cli_auth_codes` | code_hash, user_id, code_challenge, expires_at, used_at | one-time, 60 s TTL |
 | `claude_accounts` | id, account_uuid (unique), org_uuid, email, org_type, rate_limit_tier, label, plan, created_at | `plan` ∈ Pro / Max 5x / Max 20x / Team / Enterprise / API key / Unknown; label+plan admin-editable |
 | `devices` | id, user_id, hostname, os, first_seen, last_seen | unique (user_id, hostname) |
-| `sessions` | session_id (PK, Claude's UUID), user_id, device_id, account_id, cwd, project, git_branch, started_at, ended_at, summary, summary_at | |
+| `sessions` | session_id (PK, Claude's UUID), user_id, device_id, account_id, cwd, project, git_branch, title, started_at, ended_at, summary, summary_at | `title` is Claude Code's session title (trimmed, ≤200 chars); a non-empty title replaces the stored one, an absent one never clears it |
 | `usage_entries` | id, session_id, user_id, account_id, message_id, request_id (`''` if absent), model, ts, input, output, cache_write_5m, cache_write_1h, cache_read, speed, is_subagent | **unique (message_id)** — API message ids are globally unique, `requestId` is missing on most lines, and resumed sessions re-copy earlier lines into a new session file; indexes on (user_id, ts), (account_id, ts) |
 | `model_prices` | model (normalised id), input, cache_write_5m, cache_write_1h, cache_read, output, fast_input, fast_output, long_input, long_cache_write_5m, long_cache_write_1h, long_cache_read, long_output, updated_at | seeded by migration, admin-editable; `long_*` apply when the prompt exceeds 100k tokens |
 | `limit_snapshots` | id, account_id, user_id, captured_at, five_hour_pct, five_hour_resets_at, seven_day_pct, seven_day_resets_at, source | unique (account_id, captured_at) |
@@ -174,12 +174,13 @@ Limit snapshot: if `~/.claude.json` `cachedUsageUtilization` (undocumented) has 
 | `GET /me` | `{id, email, name, is_admin}` (cookie or bearer) |
 
 ### 7.2 Ingest (bearer)
-- `POST /ingest` — `{device:{hostname,os}, account:{account_uuid,org_uuid,email,org_type,rate_limit_tier}|null, sessions:[{session_id,cwd,project,git_branch,started_at,ended_at}], entries:[…], limit_snapshot?}`. Single transaction: upsert device/account/sessions (sessions are only ever associated with the calling user — a session id owned by another user is rejected), insert entries `ON CONFLICT DO NOTHING`, insert snapshot `ON CONFLICT DO NOTHING`. Returns `{accepted, duplicates}`. Idempotent.
+- `POST /ingest` — `{device:{hostname,os}, account:{account_uuid,org_uuid,email,org_type,rate_limit_tier}|null, sessions:[{session_id,cwd,project,git_branch,title?,started_at,ended_at}], entries:[…], limit_snapshot?}`. Single transaction: upsert device/account/sessions (sessions are only ever associated with the calling user — a session id owned by another user is rejected), insert entries `ON CONFLICT DO NOTHING`, insert snapshot `ON CONFLICT DO NOTHING`. Returns `{accepted, duplicates}`. Idempotent.
 - `POST /sessions/{id}/summary` — `{summary}` (≤500 chars, trimmed); 404 unless the session belongs to the caller.
 
 ### 7.3 Queries (all take `from`, `to`, `tz`; daily buckets in `tz`)
 - `GET /me/usage` — totals, daily series by model, breakdown by account, latest limit snapshot per account the user used.
-- `GET /me/sessions?cursor` — paginated sessions with tokens, cost, summary.
+- `GET /me/sessions?cursor` — paginated sessions with tokens, cost, cwd, title, summary.
+- `GET /sessions/{id}` (bearer or cookie) — one session: totals, call count, peak context (largest single prompt), main-thread vs subagent split, per-model breakdown. Owner, or an admin with a browser session; anyone else gets 404.
 - Admin (`ADMIN_EMAILS`, checked per request):
   - `GET /admin/by-login` — per user → per account (with plan) → per model totals + daily series.
   - `GET /admin/by-account` — per account → per user totals/share + daily per-user series + limit snapshot timeline.

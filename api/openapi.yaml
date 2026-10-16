@@ -116,6 +116,25 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
 
+  /sessions/{sessionId}:
+    get:
+      operationId: getSession
+      description: >
+        One session with its usage broken down (main thread vs subagents, by model).
+        Visible to the session's owner, and to admins signed in with a browser session;
+        anyone else gets 404 so session ids are not confirmed to exist.
+      security: [{ bearer: [] }, { cookie: [] }]
+      parameters:
+        - { name: sessionId, in: path, required: true, schema: { type: string } }
+      responses:
+        "200":
+          description: Session detail
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SessionDetail" }
+        "401": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+
   /sessions/{sessionId}/summary:
     post:
       operationId: setSessionSummary
@@ -421,6 +440,11 @@ components:
         session_id: { type: string }
         cwd: { type: string }
         git_branch: { type: string }
+        title:
+          type: string
+          description: >
+            Claude Code's short session title. Trimmed and truncated to 200 characters.
+            A non-empty title replaces the stored one; an absent or empty title keeps it.
         started_at: { type: string, format: date-time }
         ended_at: { type: string, format: date-time }
 
@@ -577,12 +601,46 @@ components:
         user: { $ref: "#/components/schemas/UserRef" }
         account: { $ref: "#/components/schemas/AccountRef" }
         device_hostname: { type: string }
+        cwd: { type: string }
         project: { type: string }
         git_branch: { type: string }
+        title: { type: string, description: "Claude Code's session title, when known" }
         started_at: { type: string, format: date-time }
         ended_at: { type: string, format: date-time }
         summary: { type: string }
         totals: { $ref: "#/components/schemas/Totals" }
+
+    SessionPart:
+      type: object
+      required: [totals, calls]
+      properties:
+        totals: { $ref: "#/components/schemas/Totals" }
+        calls: { type: integer, format: int64, description: Number of usage entries (API responses) }
+
+    SessionModelUsage:
+      type: object
+      required: [model, totals, calls]
+      properties:
+        model: { type: string }
+        totals: { $ref: "#/components/schemas/Totals" }
+        calls: { type: integer, format: int64 }
+
+    SessionDetail:
+      type: object
+      required: [session, calls, peak_context_tokens, main, subagents, by_model]
+      properties:
+        session: { $ref: "#/components/schemas/Session" }
+        calls: { type: integer, format: int64, description: Number of usage entries (API responses) }
+        peak_context_tokens:
+          type: integer
+          format: int64
+          description: Largest prompt of any one call (input + cache_read + cache_write_5m + cache_write_1h).
+        main: { $ref: "#/components/schemas/SessionPart" }
+        subagents: { $ref: "#/components/schemas/SessionPart" }
+        by_model:
+          type: array
+          description: Sorted by cost descending, then model.
+          items: { $ref: "#/components/schemas/SessionModelUsage" }
 
     SessionPage:
       type: object

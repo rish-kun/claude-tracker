@@ -113,3 +113,25 @@ export function rangeAdvanced(prev: string, next: string): boolean {
   const [nFrom, nTo, nTz] = next.split('|')
   return pFrom === nFrom && pTz === nTz && pTo !== undefined && nTo !== undefined && pTo <= nTo
 }
+
+export const PRESETS: { value: Preset; label: string }[] = [
+  { value: 'today', label: 'Today' },
+  { value: '7d', label: '7 days' },
+  { value: '30d', label: '30 days' },
+  { value: '90d', label: '90 days' },
+]
+
+/** The resolved range under the range control: "1 Oct – 15 Oct", or "Since midnight" for Today. */
+export function rangeLabel(p: Preset, r: Range, locale?: string): string {
+  if (p === 'today') return 'Since midnight'
+  const fmt = (d: Date) => d.toLocaleDateString(locale, { day: 'numeric', month: 'short', timeZone: r.tz })
+  return `${fmt(r.from)} – ${fmt(new Date(r.to.getTime() - 60_000))}`
+}
+
+/** How the summary sentence opens for each preset. */
+export const RANGE_PHRASE: Record<Preset, string> = {
+  today: 'Today',
+  '7d': 'In the last 7 days',
+  '30d': 'In the last 30 days',
+  '90d': 'In the last 90 days',
+}
