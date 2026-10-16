@@ -15,6 +15,27 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Health" }
 
+  /cli/version:
+    get:
+      operationId: getCliVersion
+      description: >
+        The latest published cctrack CLI release (GitHub release tagged cli-vX.Y.Z).
+        Any other request whose User-Agent is cctrack/<version> with a version older
+        than this (or not X.Y.Z) is refused with 426 and a CliOutdated body, except
+        DELETE /auth/token so an old CLI can still log out. Unknown latest version
+        means no enforcement.
+      responses:
+        "200":
+          description: Latest release
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CliVersion" }
+        "503":
+          description: Version check not configured, or the latest version is unknown
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
   /auth/cli/start:
     get:
       operationId: cliStart
@@ -64,6 +85,7 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/CliExchangeResponse" }
         "400": { $ref: "#/components/responses/Error" }
+        "426": { $ref: "#/components/responses/CliOutdated" }
 
   /auth/token:
     delete:
@@ -90,6 +112,7 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Me" }
         "401": { $ref: "#/components/responses/Error" }
+        "426": { $ref: "#/components/responses/CliOutdated" }
 
   /ingest:
     post:
@@ -115,6 +138,7 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
+        "426": { $ref: "#/components/responses/CliOutdated" }
 
   /sessions/{sessionId}:
     get:
@@ -152,6 +176,7 @@ paths:
         "401": { $ref: "#/components/responses/Error" }
         "403": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
+        "426": { $ref: "#/components/responses/CliOutdated" }
 
   /me/usage:
     get:
@@ -360,6 +385,14 @@ components:
       content:
         application/json:
           schema: { $ref: "#/components/schemas/Error" }
+    CliOutdated:
+      description: >
+        The request came from a cctrack CLI older than the latest release (see
+        GET /cli/version). Sent for any operation except GET /cli/version and
+        DELETE /auth/token.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/CliOutdated" }
 
   schemas:
     Health:
@@ -371,6 +404,24 @@ components:
       type: object
       required: [error]
       properties: { error: { type: string } }
+
+    CliVersion:
+      type: object
+      required: [latest, tag, download_url, setup_url]
+      properties:
+        latest: { type: string, description: "X.Y.Z" }
+        tag: { type: string, description: "cli-vX.Y.Z" }
+        download_url: { type: string, description: Base URL of the release assets }
+        setup_url: { type: string, description: The release's setup guide }
+
+    CliOutdated:
+      description: 426 body for a cctrack CLI older than the latest release.
+      type: object
+      required: [error, latest, setup_url]
+      properties:
+        error: { type: string }
+        latest: { type: string }
+        setup_url: { type: string }
 
     User:
       type: object

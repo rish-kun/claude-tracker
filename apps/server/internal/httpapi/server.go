@@ -8,6 +8,7 @@ import (
 
 	"cctrack/server/internal/api"
 	"cctrack/server/internal/auth"
+	"cctrack/server/internal/cliversion"
 	"cctrack/server/internal/config"
 	"cctrack/server/internal/store"
 )
@@ -20,6 +21,8 @@ type Server struct {
 	sessions auth.SessionCodec
 	admins   map[string]bool
 	now      func() time.Time
+	// cliVersion is the latest CLI release; nil disables the version check.
+	cliVersion *cliversion.Source
 }
 
 var _ api.ServerInterface = (*Server)(nil)
@@ -29,7 +32,7 @@ func New(cfg config.Config, st *store.Store, idp auth.IdentityProvider) *Server 
 	for _, e := range cfg.AdminEmails {
 		admins[strings.ToLower(e)] = true
 	}
-	return &Server{
+	s := &Server{
 		cfg:      cfg,
 		store:    st,
 		idp:      idp,
@@ -38,6 +41,11 @@ func New(cfg config.Config, st *store.Store, idp auth.IdentityProvider) *Server 
 		admins:   admins,
 		now:      time.Now,
 	}
+	if cfg.CLIReleasesRepo != "" {
+		fetch := cliversion.GitHubFetcher(&http.Client{}, cfg.CLIReleasesRepo, cfg.GitHubToken)
+		s.cliVersion = cliversion.New(cfg.CLIReleasesRepo, fetch, func() time.Time { return s.now() })
+	}
+	return s
 }
 
 func (s *Server) isAdmin(email string) bool { return s.admins[strings.ToLower(email)] }
@@ -54,6 +62,7 @@ func (s *Server) Handler() http.Handler {
 	var h http.Handler = mux
 	h = s.csrf(h)
 	h = s.authenticate(h)
+	h = s.requireCurrentCLI(h) // before authenticate: no DB lookup for outdated CLIs
 	h = limitBody(h, 1<<20)
 	return h
 }
