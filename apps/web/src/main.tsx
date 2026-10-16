@@ -3,8 +3,11 @@ import { RouterProvider } from '@tanstack/react-router'
 import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import { createUnauthorizedHandler, LOGIN_PATH, shouldRetry } from './api/unauthorized'
+import { initTheme } from './lib/theme'
 import { router } from './router'
 import './styles.css'
+
+initTheme()
 
 // Any 401, from any query or mutation, means the session is gone: go to /login and drop the cache.
 const onError = createUnauthorizedHandler({

@@ -20,17 +20,17 @@ function readColors(): Record<ColorVar, string> {
   return out
 }
 
-/** Resolved token colours for recharts props, re-read when the colour scheme changes. */
+/** Resolved token colours for recharts props, re-read when the theme changes. */
 export function useChartColors(): Record<ColorVar, string> {
   const [colors, setColors] = useState(readColors)
   useEffect(() => {
-    const mq = window.matchMedia('(prefers-color-scheme: dark)')
     const update = () => setColors(readColors())
     // Re-read once mounted: on a cold load the first render can run before the stylesheet
     // applies, leaving every colour empty (an invisible chart).
     update()
-    mq.addEventListener('change', update)
-    return () => mq.removeEventListener('change', update)
+    const observer = new MutationObserver(update)
+    observer.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] })
+    return () => observer.disconnect()
   }, [])
   return colors
 }
