@@ -86,7 +86,8 @@ impl Quarantine {
 }
 
 /// Errors that will recur no matter how often the same request is retried.
-/// 413 is not one of them: a smaller request will do.
+/// 413 is not one of them: a smaller request will do. Nor is 426 (this
+/// cctrack is out of date): the usage uploads once cctrack is updated.
 fn deterministic(e: &ApiError) -> Option<u16> {
     match e {
         ApiError::Http(code @ (400 | 403 | 409 | 422), _) => Some(*code),
@@ -510,7 +511,8 @@ impl Uploader<'_> {
     /// no entries over the time range already uploaded (which leaves the
     /// server's range and metadata as they are). A title the server refuses
     /// is logged and not retried; a network or server error leaves the
-    /// titles for the next sync.
+    /// titles for the next sync. A rejected token or an outdated cctrack
+    /// (401, 426) fails the sync, also leaving the titles for later.
     fn send_titles(&mut self, sessions: Vec<IngestSession>) -> Result<()> {
         let request = |s: &[IngestSession], device: &Device| IngestRequest {
             device: device.clone(),
@@ -522,12 +524,12 @@ impl Uploader<'_> {
         for chunk in sessions.chunks(MAX_BATCH_SESSIONS) {
             match self.client.ingest(&request(chunk, &self.device)) {
                 Ok(_) => chunk.iter().for_each(|s| self.title_sent(s)),
-                Err(e @ ApiError::Unauthorized(_)) => return Err(self.fatal(e)),
+                Err(e @ (ApiError::Unauthorized(_) | ApiError::Outdated { .. })) => return Err(self.fatal(e)),
                 Err(e) if deterministic(&e).is_some() => {
                     for s in chunk {
                         match self.client.ingest(&request(std::slice::from_ref(s), &self.device)) {
                             Ok(_) => self.title_sent(s),
-                            Err(e @ ApiError::Unauthorized(_)) => return Err(self.fatal(e)),
+                            Err(e @ (ApiError::Unauthorized(_) | ApiError::Outdated { .. })) => return Err(self.fatal(e)),
                             Err(e) if deterministic(&e).is_some() => {
                                 self.title_failed(format!("title of session {} refused ({e}); not retried", s.session_id));
                                 if let Some(t) = &s.title {
@@ -1081,8 +1083,9 @@ pub fn run_with(
 
     if pending.iter().all(|(_, _, entries)| entries.is_empty()) && snapshot.is_none() && title_updates.is_empty() {
         // Nothing to upload, so nothing would notice a revoked token: check it
-        // (one cheap request) so the gate blocks before the next prompt.
-        if let Err(e @ ApiError::Unauthorized(_)) = client.me() {
+        // (one cheap request) so the gate blocks before the next prompt. An
+        // outdated CLI is reported too: later uploads would fail.
+        if let Err(e @ (ApiError::Unauthorized(_) | ApiError::Outdated { .. })) = client.me() {
             return Err(fatal(paths, &creds.token, e));
         }
         return Ok(report);

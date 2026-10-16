@@ -15,6 +15,10 @@ pub enum ApiError {
     NotFound(String),
     Http(u16, String),
     Network(String),
+    /// HTTP 426: the server refuses this cctrack version until it is updated.
+    /// `message` is the server's explanation; `latest` and `setup_url` come
+    /// from the same response when it has them.
+    Outdated { message: String, latest: Option<String>, setup_url: Option<String> },
 }
 
 impl fmt::Display for ApiError {
@@ -24,6 +28,7 @@ impl fmt::Display for ApiError {
             ApiError::NotFound(m) => write!(f, "server returned 404: {m}"),
             ApiError::Http(code, m) => write!(f, "server returned {code}: {m}"),
             ApiError::Network(m) => write!(f, "network error: {m}"),
+            ApiError::Outdated { message, .. } => f.write_str(message),
         }
     }
 }
@@ -39,6 +44,16 @@ pub fn is_secure_server(url: &Url) -> bool {
         "http" => matches!(url.host_str(), Some("localhost" | "127.0.0.1" | "[::1]")),
         _ => false,
     }
+}
+
+/// The message for a 426 whose body has no `error` (e.g. from a proxy).
+fn outdated_fallback(body: &str) -> String {
+    let body = body.trim();
+    let detail = if body.is_empty() { String::new() } else { format!(": {}", body.chars().take(200).collect::<String>()) };
+    format!(
+        "server returned 426{detail}. cctrack {} is out of date: update cctrack (see the \"Update cctrack\" section of the setup.md attached to the latest release) and try again.",
+        env!("CARGO_PKG_VERSION")
+    )
 }
 
 pub struct ApiClient {
@@ -97,14 +112,18 @@ impl ApiClient {
         if status.is_success() {
             return serde_json::from_str(&text).map(Some).map_err(|e| ApiError::Http(status.as_u16(), e.to_string()));
         }
-        let msg = serde_json::from_str::<serde_json::Value>(&text)
-            .ok()
-            .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(String::from))
-            .unwrap_or(text);
+        let body = serde_json::from_str::<serde_json::Value>(&text).ok();
+        let field = |k: &str| body.as_ref().and_then(|v| v.get(k)).and_then(|e| e.as_str()).map(String::from);
+        let msg = field("error");
         Err(match status.as_u16() {
-            401 => ApiError::Unauthorized(msg),
-            404 => ApiError::NotFound(msg),
-            code => ApiError::Http(code, msg),
+            401 => ApiError::Unauthorized(msg.unwrap_or(text)),
+            404 => ApiError::NotFound(msg.unwrap_or(text)),
+            426 => ApiError::Outdated {
+                message: msg.unwrap_or_else(|| outdated_fallback(&text)),
+                latest: field("latest"),
+                setup_url: field("setup_url"),
+            },
+            code => ApiError::Http(code, msg.unwrap_or(text)),
         })
     }
 
@@ -149,6 +168,36 @@ mod tests {
         for bad in ["http://c.example.com", "http://10.0.0.5", "http://127.0.0.2", "http://localhost.evil.com", "http://[::2]", "ftp://c.example.com"] {
             assert!(!is_secure_server(&Url::parse(bad).unwrap()), "{bad}");
         }
+    }
+
+    #[test]
+    fn http_426_is_outdated_with_the_servers_message() {
+        let mut server = mockito::Server::new();
+        let msg = "cctrack 0.2.0 is out of date: the latest is 0.3.0. Update cctrack and try again.";
+        let setup = "https://github.com/rish-kun/claude-tracker/releases/download/cli-v0.3.0/setup.md";
+        let body = serde_json::json!({ "error": msg, "latest": "0.3.0", "setup_url": setup });
+        let m = server
+            .mock("GET", "/api/me")
+            .match_header("user-agent", concat!("cctrack/", env!("CARGO_PKG_VERSION")))
+            .with_status(426)
+            .with_body(body.to_string())
+            .expect(1)
+            .create();
+        let err = ApiClient::new(&server.url(), Some("cct_x")).me().unwrap_err();
+        m.assert();
+        assert_eq!(err.to_string(), msg);
+        let ApiError::Outdated { latest, setup_url, .. } = err else { panic!("{err:?}") };
+        assert_eq!((latest.as_deref(), setup_url.as_deref()), (Some("0.3.0"), Some(setup)));
+    }
+
+    #[test]
+    fn http_426_without_a_json_body_still_says_to_update() {
+        let mut server = mockito::Server::new();
+        server.mock("DELETE", "/api/auth/token").with_status(426).with_body("Upgrade Required").create();
+        let err = ApiClient::new(&server.url(), Some("cct_x")).revoke_own_token().unwrap_err();
+        let ApiError::Outdated { message, latest: None, setup_url: None } = &err else { panic!("{err:?}") };
+        assert!(message.contains("426: Upgrade Required") && message.contains("out of date") && message.contains("Update cctrack"), "{message}");
+        assert_eq!(err.to_string(), *message);
     }
 
     #[test]
