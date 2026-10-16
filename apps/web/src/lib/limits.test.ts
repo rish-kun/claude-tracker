@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { LimitSnapshot } from '../api/client'
-import { filledCells, formatTimeTick, limitLevel, limitPressure, limitTimeline, type ResetMarker, selectResetMarkers, timeTicks, windowState } from './limits'
+import { filledCells, formatTimeTick, hasLiveWindow, limitLevel, limitPressure, limitTimeline, type ResetMarker, selectResetMarkers, timeTicks, windowState } from './limits'
 
 const snap = (captured_at: string, extra: Partial<LimitSnapshot> = {}): LimitSnapshot => ({ account_id: 1, captured_at, ...extra })
 
@@ -159,5 +159,21 @@ describe('timeTicks', () => {
 
   it('handles an empty span', () => {
     expect(timeTicks([5, 5])).toEqual([5])
+  })
+})
+
+describe('hasLiveWindow', () => {
+  const now = Date.parse('2026-10-16T12:00:00Z')
+  const before = '2026-10-16T11:00:00Z'
+  const after = '2026-10-16T13:00:00Z'
+
+  it('is true while either window has not reset', () => {
+    expect(hasLiveWindow(snap(before, { five_hour_pct: 20, five_hour_resets_at: after, seven_day_pct: 5, seven_day_resets_at: before }), now)).toBe(true)
+    expect(hasLiveWindow(snap(before, { five_hour_pct: 20, five_hour_resets_at: before, seven_day_pct: 5, seven_day_resets_at: after }), now)).toBe(true)
+  })
+
+  it('is false once every window has reset, or with no readings', () => {
+    expect(hasLiveWindow(snap(before, { five_hour_pct: 22, five_hour_resets_at: before, seven_day_pct: 10, seven_day_resets_at: before }), now)).toBe(false)
+    expect(hasLiveWindow(snap(before), now)).toBe(false)
   })
 })

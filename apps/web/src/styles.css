@@ -348,7 +348,7 @@
   .usage-grid {
     display: grid;
     grid-template-columns: minmax(0, 1fr);
-    grid-template-areas: 'limits' 'sentence' 'mix' 'ledger' 'chart' 'rail' 'foot';
+    grid-template-areas: 'limits' 'sentence' 'mix' 'ledger' 'chart' 'tokens' 'rail' 'foot';
     /* Spacing comes from margins, not row gaps, so areas that aren't rendered (loading,
        error, Today) leave no doubled gaps behind. */
     column-gap: var(--s-7);
@@ -378,6 +378,10 @@
     grid-area: chart;
   }
 
+  .area-chart-tokens {
+    grid-area: tokens;
+  }
+
   .area-ledger {
     grid-area: ledger;
   }
@@ -396,7 +400,7 @@
   @media (min-width: 1100px) {
     .usage-grid {
       grid-template-columns: minmax(0, 1fr) 320px;
-      grid-template-areas: 'limits limits' 'sentence sentence' 'mix mix' 'chart chart' 'ledger rail' 'foot foot';
+      grid-template-areas: 'limits limits' 'sentence sentence' 'mix mix' 'chart chart' 'tokens tokens' 'ledger rail' 'foot foot';
     }
   }
 

@@ -9,31 +9,32 @@ import { type LimitEntry, LimitStrip } from '../components/limits'
 import { Button, ErrorNotice, Glyph, Section, Skeleton, useDisclosure } from '../components/ui'
 import { formatTokens } from '../lib/format'
 import { explain, GLOSSARY } from '../lib/glossary'
+import { hasLiveWindow } from '../lib/limits'
 import { foldOther, markUnpriced, pivot } from '../lib/pivot'
 import { datesBetween } from '../lib/range'
 import { useRange } from '../lib/rangeContext'
 import { readTokens } from '../lib/tokens'
 import { usageSentence } from '../lib/usage'
 
+/** Plan-window cards for accounts whose reading still has a window that hasn't reset. */
+function planWindowEntries(usage: Usage, now: number): LimitEntry[] {
+  return usage.limits
+    .filter((l) => hasLiveWindow(l, now))
+    .map((l) => ({
+      accountId: l.account_id,
+      limit: l,
+      name: usage.by_account.find((r) => r.key === String(l.account_id))?.label,
+    }))
+}
+
 /**
  * No plan chip here: usage carries no account plans, and taking them from the paged
  * session list made the chip come and go while paging.
  */
-function PlanWindows({ usage, now }: { usage: Usage; now: number }) {
-  const entries: LimitEntry[] = usage.limits.map((l) => ({
-    accountId: l.account_id,
-    limit: l,
-    name: usage.by_account.find((r) => r.key === String(l.account_id))?.label,
-  }))
+function PlanWindows({ entries, now }: { entries: LimitEntry[]; now: number }) {
   return (
     <Section title="Plan windows" actions={<p className="section-desc">{GLOSSARY.planWindows.text}</p>}>
-      {entries.length === 0 ? (
-        <div className="panel">
-          <p className="meta">No plan-limit readings yet. Claude Code reports them during normal use; they appear after your next sync.</p>
-        </div>
-      ) : (
-        <LimitStrip entries={entries} now={now} />
-      )}
+      <LimitStrip entries={entries} now={now} />
     </Section>
   )
 }
@@ -140,6 +141,7 @@ export function MyUsagePage() {
   const [page, setPage] = useState(0)
   const sessions = useMySessions(page)
   const u = usage.data
+  const liveLimits = u ? planWindowEntries(u, now) : []
 
   return (
     <>
@@ -165,9 +167,12 @@ export function MyUsagePage() {
         )}
         {u && (
           <>
-            <div className="area-limits">
-              <PlanWindows usage={u} now={now} />
-            </div>
+            {/* Readings whose windows have all reset say nothing about now, so they're left out. */}
+            {liveLimits.length > 0 && (
+              <div className="area-limits">
+                <PlanWindows entries={liveLimits} now={now} />
+              </div>
+            )}
             <div className="area-sentence">
               <Sentence usage={u} />
             </div>
@@ -183,6 +188,16 @@ export function MyUsagePage() {
                   title="API-equivalent cost per day by model"
                   pivot={markUnpriced(foldOther(pivot(u.daily_by_model, datesBetween(range), 'cost_usd')))}
                   footnote={<UnpricedNote tokens={u.totals.unpriced_tokens} />}
+                />
+              </Section>
+            )}
+            {preset !== 'today' && u.daily_by_model.length > 0 && (
+              <Section title="Tokens per day, by model" className="area-chart-tokens">
+                <StackedDailyBars
+                  title="Tokens per day by model"
+                  unit="tokens"
+                  pivot={foldOther(pivot(u.daily_by_model, datesBetween(range), 'total_tokens'))}
+                  footnote={<span>Read and written, cache reads included.</span>}
                 />
               </Section>
             )}
