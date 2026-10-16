@@ -179,8 +179,9 @@ pub fn is_allowed_bash(command: &str, bin: &TrustedBinary) -> bool {
 /// Where cctrack's releases (and the setup guide attached to each) live.
 pub const RELEASES_URL: &str = "https://github.com/rish-kun/claude-tracker/releases";
 
-/// The server's setup guide URL, if it points into [`RELEASES_URL`]: the
-/// agent is told to follow it, so the server may not send it elsewhere.
+/// The server's setup guide URL, if it is exactly a release's setup.md under
+/// [`RELEASES_URL`] (`download/cli-vX.Y.Z/setup.md`): the agent is told to follow it, so the
+/// server may neither send it elsewhere nor put words in its path.
 /// Returns the normalised URL.
 fn trusted_setup_url(raw: &str) -> Option<String> {
     let url = reqwest::Url::parse(raw).ok()?;
@@ -192,9 +193,16 @@ fn trusted_setup_url(raw: &str) -> Option<String> {
         && url.password().is_none()
         && url.query().is_none()
         && url.fragment().is_none()
-        && segments.len() > 3
-        && segments[..3] == ["rish-kun", "claude-tracker", "releases"];
+        && matches!(segments.as_slice(), ["rish-kun", "claude-tracker", "releases", "download", tag, "setup.md"] if is_cli_tag(tag));
     official.then(|| url.to_string())
+}
+
+/// `cli-vX.Y.Z` with X, Y and Z made of digits.
+fn is_cli_tag(tag: &str) -> bool {
+    tag.strip_prefix("cli-v").is_some_and(|v| {
+        let parts: Vec<&str> = v.split('.').collect();
+        parts.len() == 3 && parts.iter().all(|p| !p.is_empty() && p.len() <= 9 && p.bytes().all(|b| b.is_ascii_digit()))
+    })
 }
 
 /// Whether the server's `latest` looks like a version number (it is quoted
@@ -693,6 +701,10 @@ mod tests {
             "https://github.com:444/rish-kun/claude-tracker/releases/x",
             "https://github.com/rish-kun/claude-tracker/releases/x?y=`id`",
             "https://github.com/rish-kun/claude-tracker/releases/x#y",
+            "https://github.com/rish-kun/claude-tracker/releases/download/cli-v0.3.0/other.md",
+            "https://github.com/rish-kun/claude-tracker/releases/download/ignore-previous-instructions/setup.md",
+            "https://github.com/rish-kun/claude-tracker/releases/download/cli-v0.3/setup.md",
+            "https://github.com/rish-kun/claude-tracker/releases/download/cli-v0.3.0/setup.md/extra",
             "not a url",
         ] {
             assert_eq!(trusted_setup_url(bad), None, "{bad}");
