@@ -64,7 +64,6 @@ Download the build for your machine from the repo's GitHub Releases and put it i
 | Linux arm64 (static) | `cctrack-aarch64-unknown-linux-musl.tar.gz` |
 
 ```bash
-# The repo is private, so download with an authenticated gh (or from the Releases page).
 gh release download --repo <github-org>/<repo> --pattern 'cctrack-aarch64-apple-darwin.tar.gz'
 mkdir -p ~/.local/bin && tar -xzf cctrack-aarch64-apple-darwin.tar.gz -C ~/.local/bin
 cctrack login --server https://cctrack.example.com
@@ -77,7 +76,13 @@ A maintainer publishes a release by pushing a tag such as `cli-v0.1.0` (the
 Every release also carries `setup.md`, step-by-step instructions to give a Claude Code agent
 so it can install the CLI, sign in and add the plugin. Its server URL comes from the repo
 variable `CCTRACK_SERVER_URL` (default `https://claude-tracker-inky.vercel.app`); the template is
-`release/setup.md`. To build from source instead, run
+`release/setup.md`.
+
+When a new release is published, the server answers requests from older CLIs with `426 Upgrade
+Required` (within about 10 minutes, as it caches the latest version). Their usage is held back, not
+lost, and uploads after the update. `GET /api/cli/version` gives the latest version, and the
+"Update cctrack" section of `setup.md` walks an agent through updating. From 0.3.0 the CLI also
+tells the agent to update at the start of each session. To build from source instead, run
 `cargo install --path apps/cli` (needs Rust 1.89+).
 On a machine without a browser, sign in the first time with
 `cctrack login --server https://cctrack.example.com --paste` (afterwards `cctrack login --paste`
