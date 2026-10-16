@@ -158,6 +158,28 @@ type CliExchangeResponse struct {
 	User  User   `json:"user"`
 }
 
+// CliOutdated 426 body for a cctrack CLI older than the latest release.
+type CliOutdated struct {
+	Error    string `json:"error"`
+	Latest   string `json:"latest"`
+	SetupUrl string `json:"setup_url"`
+}
+
+// CliVersion defines model for CliVersion.
+type CliVersion struct {
+	// DownloadUrl Base URL of the release assets
+	DownloadUrl string `json:"download_url"`
+
+	// Latest X.Y.Z
+	Latest string `json:"latest"`
+
+	// SetupUrl The release's setup guide
+	SetupUrl string `json:"setup_url"`
+
+	// Tag cli-vX.Y.Z
+	Tag string `json:"tag"`
+}
+
 // Device defines model for Device.
 type Device struct {
 	Hostname string `json:"hostname"`
@@ -545,6 +567,9 @@ type ServerInterface interface {
 
 	// (GET /auth/web/start)
 	WebStart(w http.ResponseWriter, r *http.Request)
+
+	// (GET /cli/version)
+	GetCliVersion(w http.ResponseWriter, r *http.Request)
 
 	// (GET /healthz)
 	GetHealth(w http.ResponseWriter, r *http.Request)
@@ -1087,6 +1112,20 @@ func (siw *ServerInterfaceWrapper) WebStart(w http.ResponseWriter, r *http.Reque
 	handler.ServeHTTP(w, r)
 }
 
+// GetCliVersion operation middleware
+func (siw *ServerInterfaceWrapper) GetCliVersion(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.GetCliVersion(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
 // GetHealth operation middleware
 func (siw *ServerInterfaceWrapper) GetHealth(w http.ResponseWriter, r *http.Request) {
 
@@ -1407,6 +1446,7 @@ func HandlerWithOptions(si ServerInterface, options StdHTTPServerOptions) http.H
 	}
 
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/healthz", wrapper.GetHealth)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/cli/version", wrapper.GetCliVersion)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/auth/cli/start", wrapper.CliStart)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/auth/web/start", wrapper.WebStart)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/auth/google/callback", wrapper.GoogleCallback)

@@ -15,6 +15,9 @@ Find out how the user starts Claude Code. Usually that's `claude`. Some people u
 script, for example one that routes Claude Code through a local proxy. Use the user's command
 wherever this file says `claude`.
 
+If `~/.local/bin/cctrack --version` already works, cctrack is installed: follow
+[Update cctrack](#update-cctrack) instead of steps 1 to 5.
+
 ## 1. Install the CLI
 
 cctrack is a single binary that needs nothing else.
@@ -93,3 +96,29 @@ Run `~/.local/bin/cctrack proxy status` and show the user the output.
    - whether the plugin is enabled.
 
 Their sessions appear on the dashboard at {{SERVER_URL}}.
+
+## Update cctrack
+
+The server rejects an outdated cctrack with `HTTP 426` ("cctrack … is out of date"), and then usage
+stops uploading until it's updated. No usage is lost: it uploads on the next sync after the update.
+Follow these steps when you see that error, when the user asks, or when cctrack is already installed.
+
+1. Find the installed and the latest version:
+   ```
+   ~/.local/bin/cctrack --version
+   curl -fsS {{SERVER_URL}}/api/cli/version
+   ```
+   The JSON's `latest` is the version to run and `tag` is its release (for example `cli-v0.3.0`).
+   If `--version` already prints `cctrack <latest>`, it's up to date: skip to step 4.
+2. Do step 1 of this file again with `base=https://github.com/{{REPO}}/releases/download/<tag>`,
+   using the `tag` from the JSON (not this file's {{TAG}}). Extracting into `~/.local/bin` replaces
+   the old binary. The login is kept, so don't sign in again.
+3. Check that `~/.local/bin/cctrack --version` prints the latest version.
+4. Update the plugin:
+   ```
+   claude plugin marketplace update cctrack
+   claude plugin update cctrack@cctrack
+   ```
+5. Run `~/.local/bin/cctrack status` (it must exit 0) and `~/.local/bin/cctrack sync`, which
+   uploads anything that was held back. Tell the user the old and new versions, and to restart
+   Claude Code.

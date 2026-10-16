@@ -1,4 +1,4 @@
-import { type ComponentProps, type ReactNode, useEffect, useId, useRef, useState } from 'react'
+import { type ComponentProps, type KeyboardEvent, type ReactNode, useEffect, useId, useRef, useState } from 'react'
 
 /* ───────── Glyphs (§2.4): 16×16 line icons, inline SVG, decorative. ───────── */
 
@@ -77,6 +77,58 @@ export function Button({
 }: ComponentProps<'button'> & { variant?: ButtonVariant; size?: 'sm' | 'lg' }) {
   const cls = ['btn', `btn-${variant}`, size && `btn-${size}`, className].filter(Boolean).join(' ')
   return <button type={type} className={cls} {...rest} />
+}
+
+/* ───────── Segmented: a radio group of buttons (arrow keys move and select, one tab stop) ───────── */
+
+export function Segmented<T extends string>({
+  label,
+  options,
+  value,
+  onChange,
+  className,
+}: {
+  label: string
+  options: readonly { value: T; label: string }[]
+  value: T
+  onChange: (value: T) => void
+  className?: string
+}) {
+  const refs = useRef<(HTMLButtonElement | null)[]>([])
+  const onKey = (e: KeyboardEvent<HTMLButtonElement>, i: number) => {
+    let next = -1
+    if (e.key === 'ArrowRight' || e.key === 'ArrowDown') next = (i + 1) % options.length
+    else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') next = (i - 1 + options.length) % options.length
+    else if (e.key === 'Home') next = 0
+    else if (e.key === 'End') next = options.length - 1
+    if (next < 0) return
+    e.preventDefault()
+    onChange(options[next].value)
+    refs.current[next]?.focus()
+  }
+  return (
+    <div className={className ? `segmented ${className}` : 'segmented'} role="radiogroup" aria-label={label}>
+      {options.map((o, i) => {
+        const checked = o.value === value
+        return (
+          <button
+            key={o.value}
+            ref={(el) => {
+              refs.current[i] = el
+            }}
+            type="button"
+            role="radio"
+            aria-checked={checked}
+            tabIndex={checked ? 0 : -1}
+            onClick={() => onChange(o.value)}
+            onKeyDown={(e) => onKey(e, i)}
+          >
+            {o.label}
+          </button>
+        )
+      })}
+    </div>
+  )
 }
 
 /* ───────── Notices, empty states, skeletons ───────── */

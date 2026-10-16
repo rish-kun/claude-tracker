@@ -8,7 +8,7 @@
 /* ───────────────────────────── tokens ───────────────────────────── */
 @layer tokens {
   :root {
-    color-scheme: light dark;
+    color-scheme: light;
 
     --bg: #f4f6fa;
     --surface: #ffffff;
@@ -88,44 +88,45 @@
     --gutter: 24px;
   }
 
-  @media (prefers-color-scheme: dark) {
-    :root {
-      --bg: #141b2b;
-      --surface: #1b2337;
-      --surface-2: #232d44;
-      --line: #2e3953;
-      --line-strong: #6a789a;
-      --grid: #253049;
-      --text: #e8ecf4;
-      --text-2: #b4bdcf;
-      --text-3: #8c97ad;
-      --accent: #7fdbca;
-      --on-accent: #0e2a27;
-      --weight: #6c7a98;
-      --meter-empty: #2c3753;
-      --meter-ok: #c9d2e3;
-      --meter-high: #f2b441;
-      --meter-crit: #f27765;
-      --warn-text: #f2b441;
-      --crit-text: #f27765;
-      --warn-wash: #2e2a22;
-      --crit-wash: #33222a;
+  /* Dark theme: data-theme is set on <html> before first paint (index.html, lib/theme.ts). */
+  :root[data-theme='dark'] {
+    color-scheme: dark;
 
-      --kind-written: #e8ecf4;
-      --kind-input: #b4bdcf;
-      --kind-cachewrite: #8c97ad;
-      --kind-cacheread: #5a6785;
+    --bg: #141b2b;
+    --surface: #1b2337;
+    --surface-2: #232d44;
+    --line: #2e3953;
+    --line-strong: #6a789a;
+    --grid: #253049;
+    --text: #e8ecf4;
+    --text-2: #b4bdcf;
+    --text-3: #8c97ad;
+    --accent: #7fdbca;
+    --on-accent: #0e2a27;
+    --weight: #6c7a98;
+    --meter-empty: #2c3753;
+    --meter-ok: #c9d2e3;
+    --meter-high: #f2b441;
+    --meter-crit: #f27765;
+    --warn-text: #f2b441;
+    --crit-text: #f27765;
+    --warn-wash: #2e2a22;
+    --crit-wash: #33222a;
 
-      --series-1: #3987e5;
-      --series-2: #d95926;
-      --series-3: #199e70;
-      --series-4: #c98500;
-      --series-5: #d55181;
-      --series-6: #9085e9;
-      --series-other: #5a6785;
+    --kind-written: #e8ecf4;
+    --kind-input: #b4bdcf;
+    --kind-cachewrite: #8c97ad;
+    --kind-cacheread: #5a6785;
 
-      --shadow-pop: 0 10px 28px rgb(3 6 16 / 0.55), 0 0 0 1px var(--line);
-    }
+    --series-1: #3987e5;
+    --series-2: #d95926;
+    --series-3: #199e70;
+    --series-4: #c98500;
+    --series-5: #d55181;
+    --series-6: #9085e9;
+    --series-other: #5a6785;
+
+    --shadow-pop: 0 10px 28px rgb(3 6 16 / 0.55), 0 0 0 1px var(--line);
   }
 
   @media (min-width: 860px) {
@@ -574,6 +575,12 @@
     overflow-wrap: anywhere;
   }
 
+  .menu-pop .menu-label {
+    color: var(--text-3);
+    font: var(--t-micro);
+    margin-bottom: var(--s-2);
+  }
+
   .menu-pop hr {
     border: 0;
     border-top: var(--hair);
@@ -587,8 +594,8 @@
     }
   }
 
-  /* Page header and range control */
-  .range-control {
+  /* Segmented radio groups (date range, appearance) */
+  .segmented {
     display: inline-flex;
     padding: 2px;
     gap: 2px;
@@ -596,7 +603,7 @@
     border-radius: var(--r-ctl);
   }
 
-  .range-control button {
+  .segmented button {
     height: 32px;
     padding: 0 12px;
     border: 0;
@@ -607,15 +614,24 @@
     white-space: nowrap;
   }
 
-  .range-control button:hover {
+  .segmented button:hover {
     color: var(--text);
     background: var(--surface-2);
   }
 
-  .range-control button[aria-checked='true'] {
+  .segmented button[aria-checked='true'] {
     background: var(--accent-wash);
     color: var(--text);
     box-shadow: inset 0 0 0 1px var(--accent);
+  }
+
+  .theme-control {
+    display: flex;
+  }
+
+  .theme-control button {
+    flex: 1;
+    padding: 0 4px;
   }
 
   @media (max-width: 559px) {

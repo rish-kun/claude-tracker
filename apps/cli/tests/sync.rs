@@ -1411,3 +1411,146 @@ fn titles_of_sessions_uploaded_before_session_state_existed_are_sent_once() {
     assert_eq!((report.entries_sent, report.titles_sent), (0, 0));
     mock.assert();
 }
+
+// ---- HTTP 426: this cctrack is out of date ----
+
+const OUTDATED_SETUP: &str = "https://github.com/rish-kun/claude-tracker/releases/download/cli-v9.9.0/setup.md";
+const OUTDATED_MSG: &str = "cctrack 0.3.0 is out of date: the latest is 9.9.0. Update cctrack (see \
+    https://github.com/rish-kun/claude-tracker/releases/download/cli-v9.9.0/setup.md, section \"Update cctrack\") and try again.";
+
+fn outdated_body() -> String {
+    serde_json::json!({ "error": OUTDATED_MSG, "latest": "9.9.0", "setup_url": OUTDATED_SETUP }).to_string()
+}
+
+/// A 426 is retried later: nothing advanced, nothing quarantined, the login stands.
+fn assert_kept_for_retry(fx: &Fixture) {
+    let offsets = Offsets::load(&fx.paths.offsets());
+    assert_eq!(offsets.get(&fx.transcript).offset, 0, "main transcript offset must not advance");
+    assert_eq!(offsets.get(&subagent_path(fx)).offset, 0, "subagent offset must not advance");
+    assert!(!fx.paths.quarantine().exists(), "nothing may be quarantined");
+    assert!(!fx.paths.last_snapshot().exists());
+    assert!(matches!(credentials::load(&fx.paths), AuthState::LoggedIn(c) if !c.invalid), "credentials must stay valid");
+}
+
+#[test]
+fn outdated_cli_keeps_offsets_quarantines_nothing_and_keeps_the_login() {
+    let fx = fixture();
+    let mut server = mockito::Server::new();
+    let mock = server
+        .mock("POST", "/api/ingest")
+        .match_header("user-agent", concat!("cctrack/", env!("CARGO_PKG_VERSION")))
+        .with_status(426)
+        .with_body(outdated_body())
+        .expect(2)
+        .create();
+    let client = ApiClient::new(&server.url(), Some("cct_test"));
+    for _ in 0..2 {
+        let err = sync::run(&fx.paths, &fx.creds, &client, &opts(), now()).unwrap_err();
+        assert_eq!(err.to_string(), OUTDATED_MSG, "the server's message reaches the user");
+        assert_kept_for_retry(&fx);
+    }
+    mock.assert();
+
+    // Once cctrack is updated, the same usage uploads.
+    let (server, mock, _) = recording_server(1);
+    let client = ApiClient::new(&server.url(), Some("cct_test"));
+    assert_eq!(sync::run(&fx.paths, &fx.creds, &client, &opts(), now()).unwrap().entries_sent, 2);
+    mock.assert();
+}
+
+#[test]
+fn outdated_cli_with_nothing_pending_reports_it_and_keeps_the_login() {
+    let fx = fixture();
+    drained(&fx);
+    let mut server = mockito::Server::new();
+    let me = server.mock("GET", "/api/me").with_status(426).with_body(outdated_body()).expect(1).create();
+    let client = ApiClient::new(&server.url(), Some("cct_test"));
+    let err = sync::run(&fx.paths, &fx.creds, &client, &opts(), now()).unwrap_err();
+    assert_eq!(err.to_string(), OUTDATED_MSG);
+    assert!(matches!(credentials::load(&fx.paths), AuthState::LoggedIn(c) if !c.invalid));
+    me.assert();
+}
+
+#[test]
+fn outdated_cli_title_update_fails_the_sync_and_is_retried() {
+    let fx = fixture();
+    append(&fx.transcript, "\n");
+    drained(&fx);
+    // A title change with no new usage: sent on its own.
+    append(&fx.transcript, "{\"type\":\"custom-title\",\"customTitle\":\"Later title\",\"sessionId\":\"sess-1\"}\n");
+    let mut server = mockito::Server::new();
+    let mock = server.mock("POST", "/api/ingest").with_status(426).with_body(outdated_body()).expect(1).create();
+    let client = ApiClient::new(&server.url(), Some("cct_test"));
+    let err = sync::run(&fx.paths, &fx.creds, &client, &opts(), now()).unwrap_err();
+    assert_eq!(err.to_string(), OUTDATED_MSG);
+    assert!(!fx.paths.quarantine().exists());
+    mock.assert();
+
+    let (server, mock, bodies) = recording_server(1);
+    let client = ApiClient::new(&server.url(), Some("cct_test"));
+    assert_eq!(sync::run(&fx.paths, &fx.creds, &client, &opts(), now()).unwrap().titles_sent, 1);
+    assert_eq!(sessions_of(&bodies.lock().unwrap()[0])[0]["title"], "Later title");
+    mock.assert();
+}
+
+/// The cctrack binary with every location inside the fixture's directory.
+fn cctrack_cmd(fx: &Fixture, args: &[&str]) -> std::process::Command {
+    let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_cctrack"));
+    cmd.args(args)
+        .env("HOME", fx._dir.path())
+        .env("CCTRACK_CONFIG_DIR", &fx.paths.config_dir)
+        .env("CCTRACK_STATE_DIR", &fx.paths.state_dir)
+        .env("CLAUDE_CONFIG_DIR", &fx.paths.claude_dir)
+        .env("CCTRACK_CLIPROXY_DIR", &fx.paths.cliproxy_dir)
+        .stdin(std::process::Stdio::null());
+    for var in ["CCTRACK_SERVER", "CCTRACK_PROXY_MODE", "ANTHROPIC_BASE_URL", "XDG_CONFIG_HOME", "XDG_STATE_HOME"] {
+        cmd.env_remove(var);
+    }
+    cmd
+}
+
+#[test]
+fn outdated_cli_commands_print_the_servers_message_and_fail() {
+    let fx = fixture();
+    fs::write(fx.paths.claude_dir.join(".claude.json"), CLAUDE_JSON).unwrap();
+    let mut server = mockito::Server::new();
+    credentials::save(&fx.paths, &Credentials { server: server.url(), ..fx.creds.clone() }).unwrap();
+    let ingest = server.mock("POST", "/api/ingest").with_status(426).with_body(outdated_body()).expect(3).create();
+    let me = server.mock("GET", "/api/me").with_status(426).with_body(outdated_body()).expect(2).create();
+    let summary = server.mock("POST", mockito::Matcher::Regex("^/api/sessions/".into())).expect(0).create();
+
+    // Like any other server error: the message on stderr, exit code 1, no success claim.
+    for args in [&["sync"][..], &["whoami"], &["upload", "--session", "sess-1", "--summary", "did things"]] {
+        let out = cctrack_cmd(&fx, args).output().unwrap();
+        let (stdout, stderr) = (String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+        assert_eq!(out.status.code(), Some(1), "{args:?}: {stdout} {stderr}");
+        assert_eq!(stderr.trim(), format!("cctrack: {OUTDATED_MSG}"), "{args:?}");
+        assert_eq!(stdout, "", "{args:?}");
+    }
+    // The hooks' quiet sync fails too, and logs the message.
+    let out = cctrack_cmd(&fx, &["sync", "--quiet"]).output().unwrap();
+    assert_eq!((out.status.code(), out.stderr.len()), (Some(1), 0));
+    assert!(fs::read_to_string(fx.paths.sync_log()).unwrap().contains(OUTDATED_MSG));
+    assert_kept_for_retry(&fx);
+
+    // SessionStart tells the agent to update cctrack first and keeps the login.
+    let mut child = cctrack_cmd(&fx, &["hook", "session-start"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    std::io::Write::write_all(&mut child.stdin.take().unwrap(), br#"{"session_id":"sess-1"}"#).unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert!(out.status.success());
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let ctx = v["hookSpecificOutput"]["additionalContext"].as_str().unwrap();
+    assert!(ctx.starts_with("cctrack: OUT OF DATE. Before doing any other work"), "{ctx}");
+    assert!(ctx.contains(&format!("cctrack {} is out of date (the latest is 9.9.0)", env!("CARGO_PKG_VERSION"))), "{ctx}");
+    assert!(ctx.contains(&format!("the \"Update cctrack\" section of {OUTDATED_SETUP}")), "{ctx}");
+    assert!(ctx.contains("restart Claude Code") && ctx.contains("Claude Code session id: sess-1"), "{ctx}");
+    assert_kept_for_retry(&fx);
+
+    ingest.assert();
+    me.assert();
+    summary.assert();
+}

@@ -1,11 +1,12 @@
 import { useQueryClient } from '@tanstack/react-query'
 import { Link, Outlet, useNavigate, useRouterState } from '@tanstack/react-router'
-import { type KeyboardEvent, type ReactNode, type RefObject, useEffect, useMemo, useRef, useState } from 'react'
+import { type ReactNode, type RefObject, useEffect, useMemo, useRef, useState } from 'react'
 import { ApiError, type Me } from '../api/client'
 import { useAccounts, useLogout, useMe } from '../api/hooks'
 import { msUntilRangeTick, nextMinute, type Preset, PRESETS, presetRange, rangeLabel } from '../lib/range'
 import { RangeContext, useRange } from '../lib/rangeContext'
-import { Button, ErrorNotice, Glyph } from './ui'
+import { setThemePref, THEME_OPTIONS, useThemePref } from '../lib/theme'
+import { Button, ErrorNotice, Glyph, Segmented } from './ui'
 
 /**
  * The current time, re-read on every whole minute (which includes local midnight) and
@@ -69,6 +70,7 @@ function UserMenu({ me }: { me: Me }) {
   const queryClient = useQueryClient()
   const [open, setOpen] = useState(false)
   const wrap = useRef<HTMLDivElement>(null)
+  const theme = useThemePref()
   const trigger = useRef<HTMLButtonElement>(null)
   const display = me.name || me.email
   const first = (me.name || me.email.split('@')[0]).split(/\s+/)[0]
@@ -121,6 +123,11 @@ function UserMenu({ me }: { me: Me }) {
         <div className="menu-pop" id="user-menu-pop">
           <div style={{ fontWeight: 600 }}>{me.name || me.email}</div>
           {me.name && <div className="menu-email">{me.email}</div>}
+          <hr />
+          <div className="menu-label" aria-hidden="true">
+            Appearance
+          </div>
+          <Segmented className="theme-control" label="Appearance" options={THEME_OPTIONS} value={theme} onChange={setThemePref} />
           <hr />
           <Button
             variant="secondary"
@@ -228,44 +235,10 @@ export function AppLayout() {
   )
 }
 
-/** Date range presets as a radio group: arrow keys move and select, one tab stop. */
+/** Date range presets as a radio group. */
 export function RangeControl() {
   const { preset, setPreset } = useRange()
-  const refs = useRef<(HTMLButtonElement | null)[]>([])
-  const onKey = (e: KeyboardEvent<HTMLButtonElement>, i: number) => {
-    let next = -1
-    if (e.key === 'ArrowRight' || e.key === 'ArrowDown') next = (i + 1) % PRESETS.length
-    else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') next = (i - 1 + PRESETS.length) % PRESETS.length
-    else if (e.key === 'Home') next = 0
-    else if (e.key === 'End') next = PRESETS.length - 1
-    if (next < 0) return
-    e.preventDefault()
-    setPreset(PRESETS[next].value)
-    refs.current[next]?.focus()
-  }
-  return (
-    <div className="range-control" role="radiogroup" aria-label="Date range">
-      {PRESETS.map((p, i) => {
-        const checked = p.value === preset
-        return (
-          <button
-            key={p.value}
-            ref={(el) => {
-              refs.current[i] = el
-            }}
-            type="button"
-            role="radio"
-            aria-checked={checked}
-            tabIndex={checked ? 0 : -1}
-            onClick={() => setPreset(p.value)}
-            onKeyDown={(e) => onKey(e, i)}
-          >
-            {p.label}
-          </button>
-        )
-      })}
-    </div>
-  )
+  return <Segmented className="range-control" label="Date range" options={PRESETS} value={preset} onChange={setPreset} />
 }
 
 export function PageHeader({ title, range = false, children }: { title: string; range?: boolean; children?: ReactNode }) {
