@@ -39,6 +39,8 @@ Create a Neon project (or connect Neon through the Vercel marketplace). You need
 | `ALLOWED_EMAILS` | `contractor@gmail.com` | individual addresses, comma-separated |
 | `ADMIN_EMAILS` | `you@example.com` | can see everyone's usage |
 | `AUTO_MIGRATE` | `true` | run migrations on startup (or run `make migrate` yourself) |
+| `CLI_RELEASES_REPO` | `rish-kun/claude-tracker` | optional; GitHub repo whose `cli-vX.Y.Z` releases are the latest CLI. Defaults to the Vercel git repo. Enables the CLI version check: older CLIs get `426` until updated |
+| `GITHUB_TOKEN` | | optional; raises GitHub's API rate limit for that check |
 
    At least one of `ALLOWED_DOMAINS` / `ALLOWED_EMAILS` is required: the server refuses to
    start otherwise rather than let every Google account sign in.

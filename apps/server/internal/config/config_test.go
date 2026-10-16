@@ -94,3 +94,48 @@ func TestLoadBadPublicURL(t *testing.T) {
 		t.Fatal("expected error for PUBLIC_URL without scheme")
 	}
 }
+
+func TestLoadCLIReleasesRepo(t *testing.T) {
+	for _, c := range []struct {
+		name    string
+		env     map[string]string
+		want    string
+		wantErr string
+	}{
+		{"unset disables", nil, "", ""},
+		{"explicit", map[string]string{"CLI_RELEASES_REPO": " acme/cctrack "}, "acme/cctrack", ""},
+		{"vercel fallback", map[string]string{"VERCEL_GIT_REPO_OWNER": "rish-kun", "VERCEL_GIT_REPO_SLUG": "claude-tracker"}, "rish-kun/claude-tracker", ""},
+		{"explicit beats vercel", map[string]string{"CLI_RELEASES_REPO": "acme/cctrack", "VERCEL_GIT_REPO_OWNER": "x", "VERCEL_GIT_REPO_SLUG": "y"}, "acme/cctrack", ""},
+		{"vercel owner only", map[string]string{"VERCEL_GIT_REPO_OWNER": "x"}, "", ""},
+		{"no slash", map[string]string{"CLI_RELEASES_REPO": "cctrack"}, "", "CLI_RELEASES_REPO"},
+		{"extra slash", map[string]string{"CLI_RELEASES_REPO": "a/b/c"}, "", "CLI_RELEASES_REPO"},
+		{"dot dot", map[string]string{"CLI_RELEASES_REPO": "../b"}, "", "CLI_RELEASES_REPO"},
+		{"query chars", map[string]string{"CLI_RELEASES_REPO": "a/b?x=1"}, "", "CLI_RELEASES_REPO"},
+		{"bad vercel", map[string]string{"VERCEL_GIT_REPO_OWNER": "a b", "VERCEL_GIT_REPO_SLUG": "c"}, "", "VERCEL_GIT_REPO_OWNER"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			m := valid()
+			for k, v := range c.env {
+				m[k] = v
+			}
+			cfg, err := Load(env(m))
+			if c.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), c.wantErr) {
+					t.Fatalf("err = %v, want mention of %s", err, c.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.CLIReleasesRepo != c.want {
+				t.Fatalf("CLIReleasesRepo = %q, want %q", cfg.CLIReleasesRepo, c.want)
+			}
+		})
+	}
+	m := valid()
+	m["GITHUB_TOKEN"] = " ghp_x "
+	if cfg, err := Load(env(m)); err != nil || cfg.GitHubToken != "ghp_x" {
+		t.Fatalf("GitHubToken = %q, err %v", cfg.GitHubToken, err)
+	}
+}

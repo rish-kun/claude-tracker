@@ -20,6 +20,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/cli/version": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** @description The latest published cctrack CLI release (GitHub release tagged cli-vX.Y.Z). Any other request whose User-Agent is cctrack/<version> with a version older than this (or not X.Y.Z) is refused with 426 and a CliOutdated body, except DELETE /auth/token so an old CLI can still log out. Unknown latest version means no enforcement. */
+        get: operations["getCliVersion"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/auth/cli/start": {
         parameters: {
             query?: never;
@@ -384,6 +401,22 @@ export interface components {
         Error: {
             error: string;
         };
+        CliVersion: {
+            /** @description X.Y.Z */
+            latest: string;
+            /** @description cli-vX.Y.Z */
+            tag: string;
+            /** @description Base URL of the release assets */
+            download_url: string;
+            /** @description The release's setup guide */
+            setup_url: string;
+        };
+        /** @description 426 body for a cctrack CLI older than the latest release. */
+        CliOutdated: {
+            error: string;
+            latest: string;
+            setup_url: string;
+        };
         User: {
             /** Format: int64 */
             id: number;
@@ -720,6 +753,15 @@ export interface components {
                 "application/json": components["schemas"]["Error"];
             };
         };
+        /** @description The request came from a cctrack CLI older than the latest release (see GET /cli/version). Sent for any operation except GET /cli/version and DELETE /auth/token. */
+        CliOutdated: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["CliOutdated"];
+            };
+        };
     };
     parameters: {
         From: string;
@@ -751,6 +793,35 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["Health"];
+                };
+            };
+        };
+    };
+    getCliVersion: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Latest release */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CliVersion"];
+                };
+            };
+            /** @description Version check not configured, or the latest version is unknown */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
                 };
             };
         };
@@ -871,6 +942,7 @@ export interface operations {
                 };
             };
             400: components["responses"]["Error"];
+            426: components["responses"]["CliOutdated"];
         };
     };
     revokeOwnToken: {
@@ -929,6 +1001,7 @@ export interface operations {
                 };
             };
             401: components["responses"]["Error"];
+            426: components["responses"]["CliOutdated"];
         };
     };
     ingest: {
@@ -964,6 +1037,7 @@ export interface operations {
                     "application/json": components["schemas"]["Error"];
                 };
             };
+            426: components["responses"]["CliOutdated"];
         };
     };
     getSession: {
@@ -1016,6 +1090,7 @@ export interface operations {
             401: components["responses"]["Error"];
             403: components["responses"]["Error"];
             404: components["responses"]["Error"];
+            426: components["responses"]["CliOutdated"];
         };
     };
     getMyUsage: {
