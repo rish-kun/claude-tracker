@@ -127,12 +127,15 @@ function TableToggle({ open, onToggle, controls }: { open: boolean; onToggle: ()
 
 export function StackedDailyBars({
   pivot,
-  format = formatUSD,
+  unit = 'usd',
+  format = unit === 'tokens' ? formatTokens : formatUSD,
   colorFor = seriesVar,
   title,
   footnote,
 }: {
   pivot: Pivot
+  /** What the bars measure: API-equivalent dollars, or token counts. */
+  unit?: 'usd' | 'tokens'
   format?: (n: number) => string
   colorFor?: (key: string, index: number) => ColorVar
   /** What the chart shows, e.g. "API-equivalent cost per day by model"; used for the accessible summary. */
@@ -142,7 +145,11 @@ export function StackedDailyBars({
   const c = useChartColors()
   const [table, setTable] = useState(false)
   const tableId = useId()
-  const yTicks = useMemo(() => moneyTicks(Math.max(0, ...pivot.rows.map((r) => rowTotal(pivot, r)))), [pivot])
+  const yTicks = useMemo(() => {
+    const max = Math.max(0, ...pivot.rows.map((r) => rowTotal(pivot, r)))
+    // Token counts are whole numbers: keep tick steps at 1 or more.
+    return moneyTicks(unit === 'tokens' ? Math.max(max, 5) : max)
+  }, [pivot, unit])
   const yMax = yTicks[yTicks.length - 1]
   const ariaLabel = useMemo(() => chartSummary(title, pivot, format, (d) => formatDayTick(d)), [title, pivot, format])
   const colorOf = (key: string, i: number) => c[colorFor(key, i)]
@@ -185,7 +192,7 @@ export function StackedDailyBars({
               ticks={yTicks}
               domain={[0, yMax]}
               interval={0}
-              tickFormatter={(v: number) => formatMoneyTick(v, yMax)}
+              tickFormatter={(v: number) => (unit === 'tokens' ? formatTokens(v) : formatMoneyTick(v, yMax))}
               tick={{ fill: c['--text-3'], fontSize: 12, fontFamily: 'Public Sans' }}
             />
             <Tooltip content={content} cursor={{ fill: c['--surface-2'] }} isAnimationActive={false} />

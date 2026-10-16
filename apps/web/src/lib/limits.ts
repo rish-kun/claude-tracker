@@ -161,5 +161,13 @@ export function limitPressure(l: LimitSnapshot | undefined, now: number): number
   return Math.max(five ?? 0, seven ?? 0)
 }
 
+/** Whether a reading still says something now: at least one of its windows has not reset yet. */
+export function hasLiveWindow(l: LimitSnapshot, now: number): boolean {
+  return (
+    windowState(l.five_hour_pct, l.five_hour_resets_at, now).kind === 'live' ||
+    windowState(l.seven_day_pct, l.seven_day_resets_at, now).kind === 'live'
+  )
+}
+
 /** Readings older than this are flagged as possibly out of date. */
 export const STALE_READING_MS = 3 * 60 * 60_000
