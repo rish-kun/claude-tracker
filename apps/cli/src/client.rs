@@ -7,7 +7,7 @@ use reqwest::Url;
 use reqwest::blocking::{Client, RequestBuilder};
 use serde::de::DeserializeOwned;
 
-use crate::wire::{ExchangeRequest, ExchangeResponse, IngestRequest, IngestResponse, Me};
+use crate::wire::{ExchangeRequest, ExchangeResponse, IngestRequest, IngestResponse, Me, ProxyKeyRequest, ProxyKeyRequested};
 
 #[derive(Debug)]
 pub enum ApiError {
@@ -149,6 +149,14 @@ impl ApiClient {
         self.send(self.http.post(url).json(&body))?.ok_or_else(|| ApiError::Http(204, "empty response".into()))
     }
 
+    /// Requests a new (pending) CLIProxyAPI key for this device; the server
+    /// revokes this device's previous key.
+    pub fn request_proxy_key(&self, device: &str) -> Result<ProxyKeyRequested, ApiError> {
+        let url = self.url(&["proxy-keys", "self"])?;
+        let body = ProxyKeyRequest { device_name: device };
+        self.send(self.http.post(url).json(&body))?.ok_or_else(|| ApiError::Http(204, "empty response".into()))
+    }
+
     pub fn revoke_own_token(&self) -> Result<(), ApiError> {
         let url = self.url(&["auth", "token"])?;
         self.send::<serde_json::Value>(self.http.delete(url))?;
@@ -198,6 +206,27 @@ mod tests {
         let ApiError::Outdated { message, latest: None, setup_url: None } = &err else { panic!("{err:?}") };
         assert!(message.contains("426: Upgrade Required") && message.contains("out of date") && message.contains("Update cctrack"), "{message}");
         assert_eq!(err.to_string(), *message);
+    }
+
+    #[test]
+    fn request_proxy_key_posts_the_device_with_the_cli_token() {
+        let mut server = mockito::Server::new();
+        let body = serde_json::json!({
+            "key": "ccp_AbCdEfGhIjKlMnOpQrStUv", "status": "pending",
+            "proxy_key": { "id": 3, "device_name": "mac", "status": "pending", "linked": true,
+                "user": { "id": 1, "email": "dev@example.com", "name": "Dev" }, "created_at": "2026-11-15T00:00:00Z" }
+        });
+        let m = server
+            .mock("POST", "/api/proxy-keys/self")
+            .match_header("authorization", "Bearer cct_x")
+            .match_body(mockito::Matcher::Json(serde_json::json!({ "device_name": "mac" })))
+            .with_status(201)
+            .with_body(body.to_string())
+            .expect(1)
+            .create();
+        let got = ApiClient::new(&server.url(), Some("cct_x")).request_proxy_key("mac").unwrap();
+        m.assert();
+        assert_eq!((got.key.as_str(), got.status.as_str(), got.proxy_key.id), ("ccp_AbCdEfGhIjKlMnOpQrStUv", "pending", 3));
     }
 
     #[test]

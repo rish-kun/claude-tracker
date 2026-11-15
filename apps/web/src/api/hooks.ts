@@ -103,6 +103,26 @@ export function useTokens() {
   return useQuery({ queryKey: ['admin', 'tokens'], queryFn: () => unwrap(api.GET('/admin/tokens')) })
 }
 
+export function useProxyKeys() {
+  return useQuery({ queryKey: ['admin', 'proxy-keys'], queryFn: () => unwrap(api.GET('/admin/proxy-keys')) })
+}
+
+export function useApproveProxyKey() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (id: number) => unwrap(api.POST('/admin/proxy-keys/{id}/approve', { params: { path: { id } } })),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['admin', 'proxy-keys'] }),
+  })
+}
+
+export function useRevokeProxyKey() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (id: number) => unwrap(api.DELETE('/admin/proxy-keys/{id}', { params: { path: { id } } })),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['admin', 'proxy-keys'] }),
+  })
+}
+
 export function usePrices() {
   return useQuery({ queryKey: ['admin', 'prices'], queryFn: () => unwrap(api.GET('/admin/prices')) })
 }
@@ -126,7 +146,11 @@ export function useRevokeToken() {
   const qc = useQueryClient()
   return useMutation({
     mutationFn: (id: number) => unwrap(api.DELETE('/admin/tokens/{id}', { params: { path: { id } } })),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['admin', 'tokens'] }),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ['admin', 'tokens'] })
+      // A proxy key is "linked" only while its owner has an unrevoked CLI token.
+      void qc.invalidateQueries({ queryKey: ['admin', 'proxy-keys'] })
+    },
   })
 }
 

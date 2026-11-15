@@ -359,6 +359,88 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/proxy-keys/self": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description Requests a CLIProxyAPI key for the signed-in user's device, as `cctrack proxy connect` does. CLI bearer token only. The new key is pending until an admin approves it; an unrevoked key the same user already had for the same device is revoked, so each user has one active key per device. The plain key is returned only here. */
+        post: operations["requestProxyKey"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/admin/proxy-keys": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["adminListProxyKeys"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/admin/proxy-keys/{id}/approve": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["adminApproveProxyKey"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/admin/proxy-keys/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete: operations["adminRevokeProxyKey"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/proxy/keys": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** @description Keys the admin's CLIProxyAPI should know: not revoked, and whose owner still has an unrevoked CLI token. The proxy allows approved keys and answers 403 for pending ones. Authenticated by the X-CCTrack-Proxy-Token header (env PROXY_SYNC_TOKEN), never by a bearer token or cookie. 404 when PROXY_SYNC_TOKEN is unset. */
+        get: operations["proxySyncKeys"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/admin/prices": {
         parameters: {
             query?: never;
@@ -708,6 +790,48 @@ export interface components {
             last_used_at?: string;
             /** Format: date-time */
             revoked_at?: string;
+        };
+        ProxyKey: {
+            /** Format: int64 */
+            id: number;
+            user: components["schemas"]["UserRef"];
+            device_name: string;
+            /** @enum {string} */
+            status: "pending" | "approved" | "revoked";
+            /** Format: date-time */
+            created_at: string;
+            /** Format: date-time */
+            approved_at?: string;
+            /** Format: date-time */
+            revoked_at?: string;
+            /** @description The owner has at least one unrevoked CLI token; the proxy knows the key only while linked. */
+            linked: boolean;
+        };
+        ProxyKeyRequest: {
+            /** @description The CLI sends its hostname. At most 100 characters; empty means unknown. */
+            device_name?: string;
+        };
+        ProxyKeyRequested: {
+            /** @description The plain key (ccp_...). Returned once; only its SHA-256 is stored. */
+            key: string;
+            /** @enum {string} */
+            status: "pending" | "approved";
+            proxy_key: components["schemas"]["ProxyKey"];
+        };
+        ProxySyncKeys: {
+            keys: components["schemas"]["ProxySyncKey"][];
+        };
+        ProxySyncKey: {
+            /** @description Lowercase hex SHA-256 of the plain key */
+            hash: string;
+            email: string;
+            /** @description The device name */
+            label: string;
+            /**
+             * @description The proxy allows approved keys and answers 403 for pending ones.
+             * @enum {string}
+             */
+            status: "approved" | "pending";
         };
         /** @description USD per million tokens. fast_* apply to speed=fast; long_* apply when prompt > 100k tokens. */
         PriceRates: {
@@ -1332,6 +1456,129 @@ export interface operations {
                 content?: never;
             };
             403: components["responses"]["Error"];
+            404: components["responses"]["Error"];
+        };
+    };
+    requestProxyKey: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ProxyKeyRequest"];
+            };
+        };
+        responses: {
+            /** @description Requested */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProxyKeyRequested"];
+                };
+            };
+            400: components["responses"]["Error"];
+            401: components["responses"]["Error"];
+            403: components["responses"]["Error"];
+            426: components["responses"]["CliOutdated"];
+        };
+    };
+    adminListProxyKeys: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description All proxy keys: pending first (oldest first), then approved, then revoked (each newest first) */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProxyKey"][];
+                };
+            };
+            403: components["responses"]["Error"];
+        };
+    };
+    adminApproveProxyKey: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["Id"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Approved */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            403: components["responses"]["Error"];
+            /** @description The key is missing, revoked or already approved */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    adminRevokeProxyKey: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["Id"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Revoked */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            403: components["responses"]["Error"];
+            404: components["responses"]["Error"];
+        };
+    };
+    proxySyncKeys: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Unrevoked keys of linked owners */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProxySyncKeys"];
+                };
+            };
+            401: components["responses"]["Error"];
             404: components["responses"]["Error"];
         };
     };

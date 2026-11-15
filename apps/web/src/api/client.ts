@@ -20,6 +20,7 @@ export type AccountRef = Schemas['AccountRef']
 export type Plan = Schemas['Plan']
 export type AdminUser = Schemas['AdminUser']
 export type ApiToken = Schemas['ApiToken']
+export type ProxyKey = Schemas['ProxyKey']
 export type ModelPrice = Schemas['ModelPrice']
 export type PriceRates = Schemas['PriceRates']
 

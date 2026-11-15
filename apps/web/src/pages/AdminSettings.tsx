@@ -1,7 +1,18 @@
 import { Link } from '@tanstack/react-router'
 import { useEffect, useId, useState } from 'react'
-import type { Account, ApiToken, ModelPrice, Plan } from '../api/client'
-import { useAccounts, usePrices, usePutPrice, useRevokeToken, useTokens, useUpdateAccount, useUsers } from '../api/hooks'
+import type { Account, ApiToken, ModelPrice, Plan, ProxyKey } from '../api/client'
+import {
+  useAccounts,
+  useApproveProxyKey,
+  usePrices,
+  useProxyKeys,
+  usePutPrice,
+  useRevokeProxyKey,
+  useRevokeToken,
+  useTokens,
+  useUpdateAccount,
+  useUsers,
+} from '../api/hooks'
 import { AdminOnly } from '../components/AdminOnly'
 import { PageHeader } from '../components/Layout'
 import { Button, ConfirmButton, ErrorNotice, Glyph, Notice, Section, SkeletonRows, useDisclosure } from '../components/ui'
@@ -21,6 +32,7 @@ import {
   type RowDraft,
   syncRowDraft,
 } from '../lib/prices'
+import { groupProxyKeys, revokePrompt } from '../lib/proxyKeys'
 import { useNow } from '../lib/rangeContext'
 
 const SAVED_MS = 2000
@@ -260,6 +272,139 @@ function Tokens() {
                     <TokenRows tokens={gone} now={now} />
                   </tbody>
                 </table>
+              </div>
+            </>
+          )}
+        </>
+      )}
+    </Section>
+  )
+}
+
+/* ───────── Proxy access ───────── */
+
+function ProxyKeyRows({ keys, now }: { keys: ProxyKey[]; now: number }) {
+  const approve = useApproveProxyKey()
+  const revoke = useRevokeProxyKey()
+  return (
+    <>
+      {keys.map((k) => (
+        <tr key={k.id}>
+          <td>
+            {k.user.name || k.user.email}
+            {k.user.name && <div className="sub">{k.user.email}</div>}
+          </td>
+          <td>{k.device_name}</td>
+          <td title={new Date(k.created_at).toLocaleString()}>{seen(k.created_at, now)}</td>
+          <td>
+            {k.status !== 'revoked' && !k.linked && (
+              <span className="chip chip-warn" title="No active CLI token: the proxy refuses this key until they run cctrack login">
+                Not linked
+              </span>
+            )}
+          </td>
+          <td className="num">
+            {k.status === 'revoked' ? (
+              <span className="sub">Revoked {formatDayLong(k.revoked_at ?? k.created_at, now)}</span>
+            ) : (
+              <div className="proxy-actions">
+                {k.status === 'pending' && (
+                  <Button
+                    variant="primary"
+                    size="sm"
+                    disabled={approve.isPending && approve.variables === k.id}
+                    onClick={() => approve.mutate(k.id)}
+                  >
+                    {approve.isPending && approve.variables === k.id ? 'Approving…' : 'Approve'}
+                  </Button>
+                )}
+                <ConfirmButton
+                  label="Revoke"
+                  confirmLabel={k.status === 'pending' ? 'Revoke request' : 'Revoke access'}
+                  prompt={revokePrompt(k)}
+                  pending={revoke.isPending && revoke.variables === k.id}
+                  onConfirm={() => revoke.mutate(k.id)}
+                />
+              </div>
+            )}
+            {approve.error && approve.variables === k.id && <p className="field-error">Couldn't approve: {approve.error.message}</p>}
+            {revoke.error && revoke.variables === k.id && <p className="field-error">Couldn't revoke: {revoke.error.message}</p>}
+          </td>
+        </tr>
+      ))}
+    </>
+  )
+}
+
+function ProxyKeyTable({ keys, now, hover = true }: { keys: ProxyKey[]; now: number; hover?: boolean }) {
+  return (
+    <div className="table-scroll">
+      <table className="table" data-hover={hover ? '' : undefined}>
+        <thead>
+          <tr>
+            <th scope="col">User</th>
+            <th scope="col">Device</th>
+            <th scope="col">Requested</th>
+            <th scope="col">
+              <span className="sr-only">Status</span>
+            </th>
+            <th scope="col">
+              <span className="sr-only">Action</span>
+            </th>
+          </tr>
+        </thead>
+        <tbody>
+          <ProxyKeyRows keys={keys} now={now} />
+        </tbody>
+      </table>
+    </div>
+  )
+}
+
+function ProxyAccess() {
+  const q = useProxyKeys()
+  const now = useNow()
+  const revoked = useDisclosure()
+  const { pending, approved, revoked: gone } = groupProxyKeys(q.data ?? [])
+  return (
+    <Section
+      id="proxy-access"
+      title="Proxy access"
+      description={
+        <>
+          Teammates ask for the shared Claude pool over Tailscale with <code>cctrack proxy connect</code>, one key per device. A key works only
+          once approved, and only while its owner has cctrack linked.
+        </>
+      }
+    >
+      {q.error && !q.data && <ErrorNotice what="load proxy access" error={q.error} onRetry={() => void q.refetch()} />}
+      {!q.data && !q.error && <SkeletonRows />}
+      {q.data && (
+        <>
+          {pending.length > 0 && (
+            <div className="proxy-group">
+              <h3 className="proxy-group-title">
+                Waiting for approval <span className="chip chip-sm">{pending.length}</span>
+              </h3>
+              <ProxyKeyTable keys={pending} now={now} />
+            </div>
+          )}
+          {approved.length === 0 ? (
+            pending.length === 0 && <p className="meta">No requests yet.</p>
+          ) : (
+            <div className="proxy-group">
+              {pending.length > 0 && <h3 className="proxy-group-title">Approved</h3>}
+              <ProxyKeyTable keys={approved} now={now} />
+            </div>
+          )}
+          {gone.length > 0 && (
+            <>
+              <Button variant="ghost" className="disclosure" {...revoked.buttonProps}>
+                <Glyph name="chevron-right" />
+                {revoked.open ? 'Hide' : 'Show'} {gone.length} revoked {gone.length === 1 ? 'key' : 'keys'}
+              </Button>
+              <div className="mt-3" {...revoked.regionProps}>
+                <ProxyKeyTable keys={gone} now={now} hover={false} />
               </div>
             </>
           )}
@@ -585,12 +730,14 @@ export function AdminSettingsPage() {
           <nav className="settings-nav" aria-label="Settings sections">
             <a href="#accounts">Accounts</a>
             <a href="#tokens">CLI tokens</a>
+            <a href="#proxy-access">Proxy access</a>
             <a href="#people">People</a>
             <a href="#prices">Model prices</a>
           </nav>
           <div className="settings-main">
             <Accounts />
             <Tokens />
+            <ProxyAccess />
             <People />
             <Prices />
           </div>
