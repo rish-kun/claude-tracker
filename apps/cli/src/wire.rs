@@ -103,6 +103,27 @@ pub struct ExchangeRequest<'a> {
     pub device_name: &'a str,
 }
 
+/// `POST /api/proxy-keys/self` (`cctrack proxy connect`).
+#[derive(Serialize, Debug)]
+pub struct ProxyKeyRequest<'a> {
+    pub device_name: &'a str,
+}
+
+#[derive(Deserialize, Debug)]
+pub struct ProxyKeyRequested {
+    /// The plain `ccp_…` key; the server keeps only its SHA-256.
+    pub key: String,
+    /// "pending" until the admin approves it, or "approved".
+    pub status: String,
+    pub proxy_key: RequestedProxyKey,
+}
+
+#[derive(Deserialize, Debug)]
+pub struct RequestedProxyKey {
+    pub id: i64,
+    pub device_name: String,
+}
+
 #[derive(Deserialize, Debug)]
 pub struct ExchangeResponse {
     pub token: String,

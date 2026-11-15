@@ -54,6 +54,9 @@ impl Paths {
     /// The saved proxy mode (`cctrack proxy auto|on|off`).
     pub fn proxy_config(&self) -> PathBuf { self.config_dir.join("proxy.json") }
     pub fn credentials(&self) -> PathBuf { self.config_dir.join("credentials.json") }
+    /// Keys for the admin's CLIProxyAPI, by proxy URL (`cctrack proxy connect`). 0600.
+    pub fn proxy_keys(&self) -> PathBuf { self.config_dir.join("proxy-keys.json") }
+    pub fn proxy_keys_lock(&self) -> PathBuf { self.config_dir.join("proxy-keys.lock") }
     pub fn credentials_lock(&self) -> PathBuf { self.config_dir.join("credentials.lock") }
     pub fn offsets(&self) -> PathBuf { self.state_dir.join("offsets.json") }
     pub fn sync_lock(&self) -> PathBuf { self.state_dir.join("sync.lock") }

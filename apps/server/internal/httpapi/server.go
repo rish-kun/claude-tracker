@@ -63,6 +63,16 @@ func (s *Server) Handler() http.Handler {
 	h = s.csrf(h)
 	h = s.authenticate(h)
 	h = s.requireCurrentCLI(h) // before authenticate: no DB lookup for outdated CLIs
+	// The proxy key sync authenticates with its own header only: bearer or cookie
+	// credentials sent alongside it must neither fail it nor cost a DB lookup.
+	user := h
+	h = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == proxySyncPath {
+			mux.ServeHTTP(w, r)
+			return
+		}
+		user.ServeHTTP(w, r)
+	})
 	h = limitBody(h, 1<<20)
 	return h
 }

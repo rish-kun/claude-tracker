@@ -47,6 +47,63 @@ func (e Plan) Valid() bool {
 	}
 }
 
+// Defines values for ProxyKeyStatus.
+const (
+	ProxyKeyStatusApproved ProxyKeyStatus = "approved"
+	ProxyKeyStatusPending  ProxyKeyStatus = "pending"
+	ProxyKeyStatusRevoked  ProxyKeyStatus = "revoked"
+)
+
+// Valid indicates whether the value is a known member of the ProxyKeyStatus enum.
+func (e ProxyKeyStatus) Valid() bool {
+	switch e {
+	case ProxyKeyStatusApproved:
+		return true
+	case ProxyKeyStatusPending:
+		return true
+	case ProxyKeyStatusRevoked:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for ProxyKeyRequestedStatus.
+const (
+	ProxyKeyRequestedStatusApproved ProxyKeyRequestedStatus = "approved"
+	ProxyKeyRequestedStatusPending  ProxyKeyRequestedStatus = "pending"
+)
+
+// Valid indicates whether the value is a known member of the ProxyKeyRequestedStatus enum.
+func (e ProxyKeyRequestedStatus) Valid() bool {
+	switch e {
+	case ProxyKeyRequestedStatusApproved:
+		return true
+	case ProxyKeyRequestedStatusPending:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for ProxySyncKeyStatus.
+const (
+	ProxySyncKeyStatusApproved ProxySyncKeyStatus = "approved"
+	ProxySyncKeyStatusPending  ProxySyncKeyStatus = "pending"
+)
+
+// Valid indicates whether the value is a known member of the ProxySyncKeyStatus enum.
+func (e ProxySyncKeyStatus) Valid() bool {
+	switch e {
+	case ProxySyncKeyStatusApproved:
+		return true
+	case ProxySyncKeyStatusPending:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for CliStartParamsMode.
 const (
 	Loopback CliStartParamsMode = "loopback"
@@ -312,6 +369,62 @@ type PriceRates struct {
 	Output           float64  `json:"output"`
 }
 
+// ProxyKey defines model for ProxyKey.
+type ProxyKey struct {
+	ApprovedAt *time.Time `json:"approved_at,omitempty"`
+	CreatedAt  time.Time  `json:"created_at"`
+	DeviceName string     `json:"device_name"`
+	Id         int64      `json:"id"`
+
+	// Linked The owner has at least one unrevoked CLI token; the proxy knows the key only while linked.
+	Linked    bool           `json:"linked"`
+	RevokedAt *time.Time     `json:"revoked_at,omitempty"`
+	Status    ProxyKeyStatus `json:"status"`
+	User      UserRef        `json:"user"`
+}
+
+// ProxyKeyStatus defines model for ProxyKey.Status.
+type ProxyKeyStatus string
+
+// ProxyKeyRequest defines model for ProxyKeyRequest.
+type ProxyKeyRequest struct {
+	// DeviceName The CLI sends its hostname. At most 100 characters; empty means unknown.
+	DeviceName *string `json:"device_name,omitempty"`
+}
+
+// ProxyKeyRequested defines model for ProxyKeyRequested.
+type ProxyKeyRequested struct {
+	// Key The plain key (ccp_...). Returned once; only its SHA-256 is stored.
+	Key      string                  `json:"key"`
+	ProxyKey ProxyKey                `json:"proxy_key"`
+	Status   ProxyKeyRequestedStatus `json:"status"`
+}
+
+// ProxyKeyRequestedStatus defines model for ProxyKeyRequested.Status.
+type ProxyKeyRequestedStatus string
+
+// ProxySyncKey defines model for ProxySyncKey.
+type ProxySyncKey struct {
+	Email string `json:"email"`
+
+	// Hash Lowercase hex SHA-256 of the plain key
+	Hash string `json:"hash"`
+
+	// Label The device name
+	Label string `json:"label"`
+
+	// Status The proxy allows approved keys and answers 403 for pending ones.
+	Status ProxySyncKeyStatus `json:"status"`
+}
+
+// ProxySyncKeyStatus The proxy allows approved keys and answers 403 for pending ones.
+type ProxySyncKeyStatus string
+
+// ProxySyncKeys defines model for ProxySyncKeys.
+type ProxySyncKeys struct {
+	Keys []ProxySyncKey `json:"keys"`
+}
+
 // SeriesPoint defines model for SeriesPoint.
 type SeriesPoint struct {
 	CostUsd float64 `json:"cost_usd"`
@@ -514,6 +627,9 @@ type CliExchangeJSONRequestBody = CliExchangeRequest
 // IngestJSONRequestBody defines body for Ingest for application/json ContentType.
 type IngestJSONRequestBody = IngestRequest
 
+// RequestProxyKeyJSONRequestBody defines body for RequestProxyKey for application/json ContentType.
+type RequestProxyKeyJSONRequestBody = ProxyKeyRequest
+
 // SetSessionSummaryJSONRequestBody defines body for SetSessionSummary for application/json ContentType.
 type SetSessionSummaryJSONRequestBody = SummaryRequest
 
@@ -537,6 +653,15 @@ type ServerInterface interface {
 
 	// (PUT /admin/prices/{model})
 	AdminPutPrice(w http.ResponseWriter, r *http.Request, model string, params AdminPutPriceParams)
+
+	// (GET /admin/proxy-keys)
+	AdminListProxyKeys(w http.ResponseWriter, r *http.Request)
+
+	// (DELETE /admin/proxy-keys/{id})
+	AdminRevokeProxyKey(w http.ResponseWriter, r *http.Request, id Id)
+
+	// (POST /admin/proxy-keys/{id}/approve)
+	AdminApproveProxyKey(w http.ResponseWriter, r *http.Request, id Id)
 
 	// (GET /admin/tokens)
 	AdminListTokens(w http.ResponseWriter, r *http.Request)
@@ -585,6 +710,12 @@ type ServerInterface interface {
 
 	// (GET /me/usage)
 	GetMyUsage(w http.ResponseWriter, r *http.Request, params GetMyUsageParams)
+
+	// (POST /proxy-keys/self)
+	RequestProxyKey(w http.ResponseWriter, r *http.Request)
+
+	// (GET /proxy/keys)
+	ProxySyncKeys(w http.ResponseWriter, r *http.Request)
 
 	// (GET /sessions/{sessionId})
 	GetSession(w http.ResponseWriter, r *http.Request, sessionId string)
@@ -807,6 +938,72 @@ func (siw *ServerInterfaceWrapper) AdminPutPrice(w http.ResponseWriter, r *http.
 
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.AdminPutPrice(w, r, model, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// AdminListProxyKeys operation middleware
+func (siw *ServerInterfaceWrapper) AdminListProxyKeys(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.AdminListProxyKeys(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// AdminRevokeProxyKey operation middleware
+func (siw *ServerInterfaceWrapper) AdminRevokeProxyKey(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "id" -------------
+	var id Id
+
+	err = runtime.BindStyledParameterWithOptions("simple", "id", r.PathValue("id"), &id, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "integer", Format: "int64", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "id", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.AdminRevokeProxyKey(w, r, id)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// AdminApproveProxyKey operation middleware
+func (siw *ServerInterfaceWrapper) AdminApproveProxyKey(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "id" -------------
+	var id Id
+
+	err = runtime.BindStyledParameterWithOptions("simple", "id", r.PathValue("id"), &id, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "integer", Format: "int64", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "id", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.AdminApproveProxyKey(w, r, id)
 	}))
 
 	for _, middleware := range siw.HandlerMiddlewares {
@@ -1273,6 +1470,34 @@ func (siw *ServerInterfaceWrapper) GetMyUsage(w http.ResponseWriter, r *http.Req
 	handler.ServeHTTP(w, r)
 }
 
+// RequestProxyKey operation middleware
+func (siw *ServerInterfaceWrapper) RequestProxyKey(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.RequestProxyKey(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// ProxySyncKeys operation middleware
+func (siw *ServerInterfaceWrapper) ProxySyncKeys(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.ProxySyncKeys(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
 // GetSession operation middleware
 func (siw *ServerInterfaceWrapper) GetSession(w http.ResponseWriter, r *http.Request) {
 
@@ -1467,6 +1692,11 @@ func HandlerWithOptions(si ServerInterface, options StdHTTPServerOptions) http.H
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/admin/users/{id}/sessions", wrapper.AdminListUserSessions)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/admin/tokens", wrapper.AdminListTokens)
 	m.HandleFunc(http.MethodDelete+" "+options.BaseURL+"/admin/tokens/{id}", wrapper.AdminRevokeToken)
+	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/proxy-keys/self", wrapper.RequestProxyKey)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/admin/proxy-keys", wrapper.AdminListProxyKeys)
+	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/admin/proxy-keys/{id}/approve", wrapper.AdminApproveProxyKey)
+	m.HandleFunc(http.MethodDelete+" "+options.BaseURL+"/admin/proxy-keys/{id}", wrapper.AdminRevokeProxyKey)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/proxy/keys", wrapper.ProxySyncKeys)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/admin/prices", wrapper.AdminListPrices)
 	m.HandleFunc(http.MethodPut+" "+options.BaseURL+"/admin/prices/{model}", wrapper.AdminPutPrice)
 

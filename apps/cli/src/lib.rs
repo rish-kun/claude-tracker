@@ -2,6 +2,7 @@
 
 pub mod claude_json;
 pub mod client;
+pub mod connect;
 pub mod credentials;
 pub mod detach;
 pub mod hook;

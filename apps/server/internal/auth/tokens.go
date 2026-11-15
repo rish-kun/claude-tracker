@@ -8,6 +8,9 @@ import (
 
 const TokenPrefix = "cct_"
 
+// ProxyKeyPrefix marks keys for the admin's CLIProxyAPI.
+const ProxyKeyPrefix = "ccp_"
+
 // RandomString returns nBytes of crypto randomness, base64url-encoded.
 func RandomString(nBytes int) string {
 	b := make([]byte, nBytes)
@@ -24,4 +27,10 @@ func NewToken() (plain string, hash []byte) {
 func HashToken(s string) []byte {
 	h := sha256.Sum256([]byte(s))
 	return h[:]
+}
+
+// NewProxyKey returns a new CLIProxyAPI key and its sha256 hash for storage.
+func NewProxyKey() (plain string, hash []byte) {
+	plain = ProxyKeyPrefix + RandomString(32)
+	return plain, HashToken(plain)
 }

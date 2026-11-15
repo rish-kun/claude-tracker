@@ -23,6 +23,9 @@ type Config struct {
 	// disables the CLI version check.
 	CLIReleasesRepo string
 	GitHubToken     string // optional; raises the GitHub API rate limit
+	// ProxySyncToken authenticates the admin's CLIProxyAPI on GET /proxy/keys
+	// (header X-CCTrack-Proxy-Token); empty disables that endpoint.
+	ProxySyncToken string
 }
 
 // SecureCookies reports whether cookies should carry the Secure attribute.
@@ -53,6 +56,7 @@ func Load(getenv func(string) string) (Config, error) {
 		Port:                strings.TrimSpace(getenv("PORT")),
 		CLIReleasesRepo:     strings.TrimSpace(getenv("CLI_RELEASES_REPO")),
 		GitHubToken:         strings.TrimSpace(getenv("GITHUB_TOKEN")),
+		ProxySyncToken:      strings.TrimSpace(getenv("PROXY_SYNC_TOKEN")),
 	}
 	repoVar := "CLI_RELEASES_REPO"
 	if c.CLIReleasesRepo == "" {

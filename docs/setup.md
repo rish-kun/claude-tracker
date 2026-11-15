@@ -41,6 +41,7 @@ Create a Neon project (or connect Neon through the Vercel marketplace). You need
 | `AUTO_MIGRATE` | `true` | run migrations on startup (or run `make migrate` yourself) |
 | `CLI_RELEASES_REPO` | `rish-kun/claude-tracker` | optional; GitHub repo whose `cli-vX.Y.Z` releases are the latest CLI. Defaults to the Vercel git repo. Enables the CLI version check: older CLIs get `426` until updated |
 | `GITHUB_TOKEN` | | optional; raises GitHub's API rate limit for that check |
+| `PROXY_SYNC_TOKEN` | `openssl rand -hex 32` | optional; shared secret the admin's CLIProxyAPI sends as `X-CCTrack-Proxy-Token` to `GET /api/proxy/keys` to sync approved and pending keys. Unset disables that endpoint (404) |
 
    At least one of `ALLOWED_DOMAINS` / `ALLOWED_EMAILS` is required: the server refuses to
    start otherwise rather than let every Google account sign in.
@@ -124,6 +125,36 @@ that look proxied but are credited to your own account. The proxy log is in the 
 time; if sessions a hook recorded as proxied match nothing with this machine's offset, cctrack finds
 the offset that fits from at least two such sessions (shown as a warning by `proxy status` and
 `--dry-run`).
+
+### Use the admin's shared pool over Tailscale
+
+Teammates on the tailnet can use the admin's CLIProxyAPI pool instead of their own subscription:
+
+1. Run `cctrack login` (above). The Google sign-in, limited to the allowed domains and emails, is
+   how the admin knows who is asking, whatever Tailscale account you use.
+2. Run `cctrack proxy connect <proxy-url>`, e.g. `cctrack proxy connect https://mac.tailnet.ts.net`.
+   It requests a key for this device (named after its hostname; `--device <name>` to change that),
+   saves it in cctrack's config dir (`proxy-keys.json`, mode 0600, by proxy URL), and prints the
+   Claude Code (`ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN`) and Codex (`model_providers`)
+   settings to paste. It writes no other file.
+3. It then checks the key against `<proxy-url>/v1/models`:
+   - **approved, ready**: you can use it now;
+   - **waiting for the admin to approve `<email>` on `<device>`**: the key is pending; rerun the same
+     command later to check (it reuses the saved key);
+   - **key unknown or revoked**: run `cctrack proxy connect <proxy-url> --new` for a new key;
+   - **unreachable**: check Tailscale, and that the admin's Mac is awake.
+
+   It exits 0 when the key is approved or pending, 1 otherwise. Plain `http://` URLs are refused
+   except for loopback and Tailscale (`100.64.0.0/10`) addresses.
+
+`--new` requests a fresh key and revokes this device's previous one: each person has one active key
+per device. A key works only while its owner has cctrack logged in on at least one device.
+
+**Admin:** requests appear under the dashboard's Settings → **Proxy access**, pending first, with
+the person's verified email, name, device and when they asked. **Approve** lets the key through the
+proxy (within about a minute, the proxy's sync interval); **Revoke** works on pending and approved
+keys. "Not linked" means the owner has no active CLI token, so the proxy refuses the key until they
+run `cctrack login` again.
 
 ## 5. Enable the Claude Code plugin (each developer)
 

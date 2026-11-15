@@ -328,6 +328,89 @@ paths:
         "403": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
 
+  /proxy-keys/self:
+    post:
+      operationId: requestProxyKey
+      description: >
+        Requests a CLIProxyAPI key for the signed-in user's device, as `cctrack proxy connect`
+        does. CLI bearer token only. The new key is pending until an admin approves it; an
+        unrevoked key the same user already had for the same device is revoked, so each
+        user has one active key per device. The plain key is returned only here.
+      security: [{ bearer: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ProxyKeyRequest" }
+      responses:
+        "201":
+          description: Requested
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProxyKeyRequested" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "426": { $ref: "#/components/responses/CliOutdated" }
+
+  /admin/proxy-keys:
+    get:
+      operationId: adminListProxyKeys
+      security: [{ cookie: [] }]
+      responses:
+        "200":
+          description: >
+            All proxy keys: pending first (oldest first), then approved, then revoked
+            (each newest first)
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/ProxyKey" } }
+        "403": { $ref: "#/components/responses/Error" }
+
+  /admin/proxy-keys/{id}/approve:
+    post:
+      operationId: adminApproveProxyKey
+      security: [{ cookie: [] }]
+      parameters:
+        - $ref: "#/components/parameters/Id"
+      responses:
+        "204": { description: Approved }
+        "403": { $ref: "#/components/responses/Error" }
+        "404":
+          description: The key is missing, revoked or already approved
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /admin/proxy-keys/{id}:
+    delete:
+      operationId: adminRevokeProxyKey
+      security: [{ cookie: [] }]
+      parameters:
+        - $ref: "#/components/parameters/Id"
+      responses:
+        "204": { description: Revoked }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+
+  /proxy/keys:
+    get:
+      operationId: proxySyncKeys
+      description: >
+        Keys the admin's CLIProxyAPI should know: not revoked, and whose owner still has
+        an unrevoked CLI token. The proxy allows approved keys and answers 403 for pending
+        ones. Authenticated by the X-CCTrack-Proxy-Token header (env PROXY_SYNC_TOKEN),
+        never by a bearer token or cookie. 404 when PROXY_SYNC_TOKEN is unset.
+      security: [{ proxyToken: [] }]
+      responses:
+        "200":
+          description: Unrevoked keys of linked owners
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProxySyncKeys" }
+        "401": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+
   /admin/prices:
     get:
       operationId: adminListPrices
@@ -370,6 +453,7 @@ components:
   securitySchemes:
     bearer: { type: http, scheme: bearer }
     cookie: { type: apiKey, in: cookie, name: cctrack_session }
+    proxyToken: { type: apiKey, in: header, name: X-CCTrack-Proxy-Token }
 
   parameters:
     From: { name: from, in: query, required: true, schema: { type: string, format: date-time } }
@@ -767,6 +851,52 @@ components:
         created_at: { type: string, format: date-time }
         last_used_at: { type: string, format: date-time }
         revoked_at: { type: string, format: date-time }
+
+    ProxyKey:
+      type: object
+      required: [id, user, device_name, status, created_at, linked]
+      properties:
+        id: { type: integer, format: int64 }
+        user: { $ref: "#/components/schemas/UserRef" }
+        device_name: { type: string }
+        status: { type: string, enum: [pending, approved, revoked] }
+        created_at: { type: string, format: date-time }
+        approved_at: { type: string, format: date-time }
+        revoked_at: { type: string, format: date-time }
+        linked:
+          type: boolean
+          description: The owner has at least one unrevoked CLI token; the proxy knows the key only while linked.
+
+    ProxyKeyRequest:
+      type: object
+      properties:
+        device_name: { type: string, description: "The CLI sends its hostname. At most 100 characters; empty means unknown." }
+
+    ProxyKeyRequested:
+      type: object
+      required: [key, status, proxy_key]
+      properties:
+        key: { type: string, description: "The plain key (ccp_...). Returned once; only its SHA-256 is stored." }
+        status: { type: string, enum: [pending, approved] }
+        proxy_key: { $ref: "#/components/schemas/ProxyKey" }
+
+    ProxySyncKeys:
+      type: object
+      required: [keys]
+      properties:
+        keys: { type: array, items: { $ref: "#/components/schemas/ProxySyncKey" } }
+
+    ProxySyncKey:
+      type: object
+      required: [hash, email, label, status]
+      properties:
+        hash: { type: string, description: Lowercase hex SHA-256 of the plain key }
+        email: { type: string }
+        label: { type: string, description: The device name }
+        status:
+          type: string
+          enum: [approved, pending]
+          description: The proxy allows approved keys and answers 403 for pending ones.
 
     PriceRates:
       type: object

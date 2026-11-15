@@ -139,3 +139,14 @@ func TestLoadCLIReleasesRepo(t *testing.T) {
 		t.Fatalf("GitHubToken = %q, err %v", cfg.GitHubToken, err)
 	}
 }
+
+func TestLoadProxySyncToken(t *testing.T) {
+	if cfg, err := Load(env(valid())); err != nil || cfg.ProxySyncToken != "" {
+		t.Fatalf("unset: %q, err %v", cfg.ProxySyncToken, err)
+	}
+	m := valid()
+	m["PROXY_SYNC_TOKEN"] = " sync-secret \n"
+	if cfg, err := Load(env(m)); err != nil || cfg.ProxySyncToken != "sync-secret" {
+		t.Fatalf("ProxySyncToken not trimmed, err %v", err)
+	}
+}

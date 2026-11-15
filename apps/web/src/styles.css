@@ -2144,6 +2144,28 @@
     border-top: var(--hair);
   }
 
+  /* Proxy access: pending queue, then approved keys */
+  .proxy-group + .proxy-group {
+    margin-top: var(--s-5);
+  }
+
+  .proxy-group-title {
+    display: flex;
+    align-items: center;
+    gap: var(--s-2);
+    font: 500 13px/19px var(--font-sans);
+    color: var(--text-3);
+    margin-bottom: var(--s-2);
+  }
+
+  .proxy-actions {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    align-items: center;
+    gap: var(--s-2);
+  }
+
   .account-form {
     display: grid;
     grid-template-columns: minmax(0, 18rem) minmax(0, 1fr) auto;

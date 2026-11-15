@@ -40,10 +40,11 @@ enum Cmd {
     },
     /// Show or set how usage through a local CLIProxyAPI pool is credited:
     /// auto (detect per session, the default), on (every session), off (never).
-    /// CCTRACK_PROXY_MODE overrides the saved mode.
+    /// CCTRACK_PROXY_MODE overrides the saved mode. `proxy connect` prints how
+    /// to use the admin's shared pool over Tailscale.
     Proxy {
-        #[arg(value_enum, default_value = "status")]
-        action: ProxyAction,
+        #[command(subcommand)]
+        action: Option<ProxyAction>,
     },
     /// Sign in with Google. Required before Claude Code will start work.
     Login {
@@ -87,7 +88,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
         Cmd::Status { json } => status(&paths, json),
         Cmd::Sync { transcript, dry_run: true, rescan, .. } => dry_run(&paths, transcript, rescan),
         Cmd::Sync { transcript, quiet, .. } => sync_cmd(&paths, transcript, quiet),
-        Cmd::Proxy { action } => proxy_cmd(&paths, action),
+        Cmd::Proxy { action } => proxy_cmd(&paths, action.unwrap_or(ProxyAction::Status)),
         Cmd::Login { server, paste } => {
             let server = server
                 .or_else(|| match credentials::load(&paths) {
@@ -232,7 +233,7 @@ fn sync_cmd(paths: &Paths, transcript: Option<std::path::PathBuf>, quiet: bool) 
     }
 }
 
-#[derive(Clone, Copy, clap::ValueEnum)]
+#[derive(Clone, Subcommand)]
 enum ProxyAction {
     /// Detect per session whether it runs through a CLIProxyAPI pool.
     Auto,
@@ -240,8 +241,51 @@ enum ProxyAction {
     On,
     /// Never credit pool accounts (the behaviour before 0.2.0).
     Off,
-    /// Show the mode, what is detected and why, and the pool accounts.
+    /// Show the mode, what is detected and why, and the pool accounts (the default).
     Status,
+    /// Get a key for the admin's shared pool (needs `cctrack login`), print the
+    /// Claude Code and Codex settings, then check whether the admin approved it.
+    /// The key is saved in cctrack's config dir and reused on later runs.
+    Connect {
+        /// The proxy's Tailscale URL, e.g. https://mac.tailnet.ts.net
+        url: String,
+        /// Request a new key for this device (revokes its previous one).
+        #[arg(long)]
+        new: bool,
+        /// The device name the admin sees (default: this machine's hostname).
+        #[arg(long)]
+        device: Option<String>,
+    },
+}
+
+fn proxy_connect(paths: &Paths, url: &str, new: bool, device: Option<String>) -> Result<ExitCode> {
+    use cctrack::client::{ApiClient, ApiError};
+    use cctrack::connect;
+    let url = connect::normalize_url(url).map_err(anyhow::Error::msg)?;
+    let creds = match credentials::load(paths) {
+        AuthState::LoggedIn(c) => c,
+        AuthState::Invalid(_) => anyhow::bail!("your cctrack token was revoked or expired — run `cctrack login` first"),
+        AuthState::LoggedOut => anyhow::bail!("not logged in — run `cctrack login` first, so the admin can see who is asking"),
+    };
+    let device_flag = device.map(|d| d.trim().to_string()).filter(|d| !d.is_empty());
+    let device = device_flag.clone().unwrap_or_else(cctrack::sync::hostname);
+    let got = connect::obtain_key(paths, &url, &creds, &device, new, chrono::Utc::now(), |d: &str| {
+        match ApiClient::new(&creds.server, Some(&creds.token)).request_proxy_key(d) {
+            Err(ApiError::Unauthorized(_)) => {
+                credentials::mark_invalid(paths, &creds.token)?;
+                anyhow::bail!("your cctrack token was revoked or expired — run `cctrack login`")
+            }
+            r => r.map_err(anyhow::Error::from),
+        }
+    })?;
+    if got.fresh {
+        println!("Requested a proxy key for {} on {device}.\n", creds.user.email);
+    }
+    println!("{}\n", connect::snippet(&url, &got.key));
+    println!("Checking {url}/v1/models …");
+    let outcome = connect::check(&url, &got.key, got.fresh, std::time::Duration::from_secs(15));
+    println!("{}", outcome.report(&url, &creds.user.email, &device, device_flag.as_deref()));
+    Ok(if outcome.is_success() { ExitCode::SUCCESS } else { ExitCode::FAILURE })
 }
 
 fn proxy_cmd(paths: &Paths, action: ProxyAction) -> Result<ExitCode> {
@@ -250,6 +294,7 @@ fn proxy_cmd(paths: &Paths, action: ProxyAction) -> Result<ExitCode> {
         ProxyAction::Auto => ProxyMode::Auto,
         ProxyAction::On => ProxyMode::On,
         ProxyAction::Off => ProxyMode::Off,
+        ProxyAction::Connect { url, new, device } => return proxy_connect(paths, &url, new, device),
         ProxyAction::Status => {
             let env_url = std::env::var("ANTHROPIC_BASE_URL").ok();
             let cwd = std::env::current_dir().ok();
